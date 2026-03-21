@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 const N_FEATURES: usize = 15;
 
 /// Activity classes we recognise.
-pub const CLASSES: &[&str] = &["absent", "present_still", "present_moving", "active"];
-const N_CLASSES: usize = 4;
+pub const CLASSES: &[&str] = &["absent", "present_still", "present_moving", "active", "2p_still", "2p_moving", "2p_active"];
+const N_CLASSES: usize = 7;
 
 /// Extract extended feature vector from a JSONL frame (features + raw amplitudes).
 pub fn features_from_frame(frame: &serde_json::Value) -> [f64; N_FEATURES] {
@@ -231,7 +231,10 @@ fn load_recording(path: &Path, class_idx: usize) -> Vec<Sample> {
 /// Map a recording filename to a class index.
 fn classify_recording_name(name: &str) -> Option<usize> {
     let lower = name.to_lowercase();
-    if lower.contains("empty") || lower.contains("absent") { Some(0) }
+    if lower.contains("2p_still") || lower.contains("2p_sitting") { Some(4) }
+    else if lower.contains("2p_moving") || lower.contains("2p_walking") { Some(5) }
+    else if lower.contains("2p_active") || lower.contains("2p_exercise") { Some(6) }
+    else if lower.contains("empty") || lower.contains("absent") { Some(0) }
     else if lower.contains("still") || lower.contains("sitting") || lower.contains("standing") { Some(1) }
     else if lower.contains("walking") || lower.contains("moving") { Some(2) }
     else if lower.contains("active") || lower.contains("exercise") || lower.contains("running") { Some(3) }

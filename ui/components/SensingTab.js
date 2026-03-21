@@ -110,10 +110,16 @@ export class SensingTab {
             <div class="sensing-card-title">About This Data</div>
             <p class="sensing-about-text">
               Metrics are computed from WiFi Channel State Information (CSI).
-              With <strong>1 ESP32</strong> you get presence detection, breathing
+              With <strong><span id="sensingNodeCount">0</span> ESP32 node(s)</strong> you get presence detection, breathing
               estimation, and gross motion. Add <strong>3-4+ ESP32 nodes</strong>
               around the room for spatial resolution and limb-level tracking.
             </p>
+          </div>
+
+          <!-- Node Status -->
+          <div class="sensing-card" id="sensingNodeCards">
+            <div class="sensing-card-title">NODE STATUS</div>
+            <div id="nodeStatusContainer"></div>
           </div>
 
           <!-- Extra info -->
@@ -193,6 +199,9 @@ export class SensingTab {
 
     // Update HUD
     this._updateHUD(data);
+
+    // Update per-node panels
+    this._updateNodePanels(data);
   }
 
   _onStateChange(state) {
@@ -232,6 +241,11 @@ export class SensingTab {
   _updateHUD(data) {
     const f = data.features || {};
     const c = data.classification || {};
+
+    // Node count
+    const nodeCount = (data.nodes || []).length;
+    const countEl = this.container.querySelector('#sensingNodeCount');
+    if (countEl) countEl.textContent = String(nodeCount);
 
     // RSSI
     this._setText('sensingRssi', `${(f.mean_rssi || -80).toFixed(1)} dBm`);
@@ -307,6 +321,40 @@ export class SensingTab {
       else ctx.lineTo(x, y);
     }
     ctx.stroke();
+  }
+
+  // ---- Per-node panels ---------------------------------------------------
+
+  _updateNodePanels(data) {
+    const container = this.container.querySelector('#nodeStatusContainer');
+    if (!container) return;
+    const nodeFeatures = data.node_features || [];
+    if (nodeFeatures.length === 0) {
+      container.innerHTML = '<div style="color:#888;font-size:12px;padding:8px;">No nodes detected</div>';
+      return;
+    }
+    const NODE_COLORS = ['#00ccff', '#ff6600', '#00ff88', '#ff00cc', '#ffcc00', '#8800ff', '#00ffcc', '#ff0044'];
+    let html = '';
+    for (const nf of nodeFeatures) {
+      const color = NODE_COLORS[nf.node_id % NODE_COLORS.length];
+      const statusText = nf.stale ? 'STALE' : 'ACTIVE';
+      const statusColor = nf.stale ? '#888' : '#0f0';
+      const rssi = (nf.rssi_dbm || -80).toFixed(0);
+      const variance = (nf.features?.variance || 0).toFixed(1);
+      const motion = (nf.classification?.motion_level || 'absent').toUpperCase();
+      const conf = ((nf.classification?.confidence || 0) * 100).toFixed(0);
+      html += `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;margin-bottom:4px;background:rgba(255,255,255,0.03);border-radius:6px;border-left:3px solid ${color};">
+          <div style="min-width:50px;">
+              <div style="font-size:11px;font-weight:600;color:${color};">Node ${nf.node_id}</div>
+              <div style="font-size:9px;color:${statusColor};">${statusText}</div>
+          </div>
+          <div style="flex:1;font-size:10px;color:#aaa;">
+              <span>${rssi} dBm</span> · <span>var ${variance}</span>
+          </div>
+          <div style="font-size:10px;font-weight:600;color:#ccc;">${motion} <span style="color:#888">${conf}%</span></div>
+      </div>`;
+    }
+    container.innerHTML = html;
   }
 
   // ---- Resize ------------------------------------------------------------
