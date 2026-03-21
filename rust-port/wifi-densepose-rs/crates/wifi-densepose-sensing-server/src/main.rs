@@ -559,7 +559,7 @@ fn parse_esp32_frame(buf: &[u8]) -> Option<Esp32Frame> {
     let sequence = u32::from_le_bytes([buf[10], buf[11], buf[12], buf[13]]);
     let rssi_raw = buf[14] as i8;
     // Fix RSSI sign: ensure it's always negative (dBm convention).
-    let rssi = if rssi_raw > 0 { -rssi_raw } else { rssi_raw };
+    let rssi = if rssi_raw > 0 { rssi_raw.saturating_neg() } else { rssi_raw };
     let noise_floor = buf[15] as i8;
 
     let iq_start = 20;
@@ -3178,6 +3178,11 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         0
                     };
 
+                    let signal_field = generate_signal_field(
+                        fused_features.mean_rssi, motion_score, breathing_rate_hz,
+                        fused_features.variance.min(1.0), &sub_variances,
+                    );
+
                     let mut update = SensingUpdate {
                         msg_type: "sensing_update".to_string(),
                         timestamp: chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
@@ -3186,10 +3191,7 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                         nodes: active_nodes,
                         features: fused_features,
                         classification: fused_classification,
-                        signal_field: generate_signal_field(
-                            features.mean_rssi, motion_score, breathing_rate_hz,
-                            features.variance.min(1.0), &sub_variances,
-                        ),
+                        signal_field,
                         vital_signs: Some(vitals),
                         enhanced_motion: None,
                         enhanced_breathing: None,
