@@ -21,8 +21,14 @@ use std::path::{Path, PathBuf};
 
 // ── Feature vector ───────────────────────────────────────────────────────────
 
-/// Extended feature vector: 7 server features + 8 subcarrier-derived features = 15.
+/// Legacy feature vector: 7 server features + 8 subcarrier-derived features = 15.
 const N_FEATURES: usize = 15;
+
+/// Multi-node feature vector constants.
+const MAX_NODES: usize = 8;
+const N_PER_NODE: usize = 7; // variance, motion_band, breathing_band, spectral, dominant_freq, change_points, rssi
+const N_CROSS_NODE: usize = 6;
+const N_MULTI_FEATURES: usize = MAX_NODES * N_PER_NODE + N_CROSS_NODE; // 62
 
 /// Default class names for backward compatibility with old saved models.
 const DEFAULT_CLASSES: &[&str] = &["absent", "present_still", "present_moving", "active"];
@@ -58,7 +64,7 @@ pub fn features_from_frame(frame: &serde_json::Value) -> [f64; N_FEATURES] {
 }
 
 /// Also keep a simpler version for runtime (no JSONL, just FeatureInfo + amps).
-pub fn features_from_runtime(feat: &serde_json::Value, amps: &[f64]) -> [f64; N_FEATURES] {
+pub fn features_from_runtime(feat: &serde_json::Value, amps: &[f64]) -> Vec<f64> {
     let variance = feat.get("variance").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let mbp = feat.get("motion_band_power").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let bbp = feat.get("breathing_band_power").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -68,10 +74,92 @@ pub fn features_from_runtime(feat: &serde_json::Value, amps: &[f64]) -> [f64; N_
     let rssi = feat.get("mean_rssi").and_then(|v| v.as_f64()).unwrap_or(0.0);
     let (amp_mean, amp_std, amp_skew, amp_kurt, amp_iqr, amp_entropy, amp_max, amp_range) =
         subcarrier_stats(amps);
-    [
+    vec![
         variance, mbp, bbp, sp, df, cp, rssi,
         amp_mean, amp_std, amp_skew, amp_kurt, amp_iqr, amp_entropy, amp_max, amp_range,
     ]
+}
+
+/// Extract per-node features from a JSONL recording frame.
+pub fn multi_features_from_frame(frame: &serde_json::Value) -> Vec<f64> {
+    let mut features = vec![0.0f64; N_MULTI_FEATURES];
+
+    let node_features = frame.get("node_features")
+        .and_then(|v| v.as_array());
+
+    if let Some(nodes) = node_features {
+        // Sort by node_id for consistent ordering.
+        let mut sorted: Vec<&serde_json::Value> = nodes.iter().collect();
+        sorted.sort_by_key(|n| n.get("node_id").and_then(|v| v.as_u64()).unwrap_or(255));
+
+        let n_nodes = sorted.len().min(MAX_NODES);
+
+        // Per-node features (7 per node, padded to MAX_NODES with zeros).
+        for (i, node) in sorted.iter().take(MAX_NODES).enumerate() {
+            let f = node.get("features").cloned().unwrap_or(serde_json::Value::Null);
+            let offset = i * N_PER_NODE;
+            features[offset]     = f.get("variance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            features[offset + 1] = f.get("motion_band_power").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            features[offset + 2] = f.get("breathing_band_power").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            features[offset + 3] = f.get("spectral_power").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            features[offset + 4] = f.get("dominant_freq_hz").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            features[offset + 5] = f.get("change_points").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            features[offset + 6] = node.get("rssi_dbm").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        }
+
+        // Cross-node features (last 6 slots).
+        let cross_offset = MAX_NODES * N_PER_NODE;
+        let variances: Vec<f64> = sorted.iter().take(n_nodes)
+            .map(|n| n.get("features").and_then(|f| f.get("variance")).and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .collect();
+        let motions: Vec<f64> = sorted.iter().take(n_nodes)
+            .map(|n| n.get("features").and_then(|f| f.get("motion_band_power")).and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .collect();
+        let rssis: Vec<f64> = sorted.iter().take(n_nodes)
+            .map(|n| n.get("rssi_dbm").and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .collect();
+        let breathings: Vec<f64> = sorted.iter().take(n_nodes)
+            .map(|n| n.get("features").and_then(|f| f.get("breathing_band_power")).and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .collect();
+
+        let nn = n_nodes as f64;
+
+        // Cross-node variance spread (std of per-node variances).
+        let var_mean = variances.iter().sum::<f64>() / nn.max(1.0);
+        features[cross_offset] = (variances.iter().map(|v| (v - var_mean).powi(2)).sum::<f64>() / nn.max(1.0)).sqrt();
+
+        // Cross-node motion spread.
+        let mot_mean = motions.iter().sum::<f64>() / nn.max(1.0);
+        features[cross_offset + 1] = (motions.iter().map(|v| (v - mot_mean).powi(2)).sum::<f64>() / nn.max(1.0)).sqrt();
+
+        // Number of nodes (normalized to 0-1 range for MAX_NODES=8).
+        features[cross_offset + 2] = n_nodes as f64 / MAX_NODES as f64;
+
+        // RSSI spread (max - min).
+        let rssi_max = rssis.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let rssi_min = rssis.iter().cloned().fold(f64::INFINITY, f64::min);
+        features[cross_offset + 3] = rssi_max - rssi_min;
+
+        // Mean breathing coherence.
+        features[cross_offset + 4] = breathings.iter().sum::<f64>() / nn.max(1.0);
+
+        // Variance entropy (how evenly distributed the signal is across nodes).
+        let total_var = variances.iter().sum::<f64>().max(1e-9);
+        features[cross_offset + 5] = -variances.iter()
+            .map(|v| { let p = v / total_var; if p > 1e-12 { p * p.ln() } else { 0.0 } })
+            .sum::<f64>() / (nn.ln().max(1e-9));
+    }
+    // If no node_features, all zeros (old recording format).
+
+    features
+}
+
+/// For runtime classification using the live per-node data from the server state.
+/// Takes the node_features array directly (same shape as in recordings).
+pub fn multi_features_from_runtime(node_features_json: &serde_json::Value) -> Vec<f64> {
+    let mut frame = serde_json::json!({});
+    frame["node_features"] = node_features_json.clone();
+    multi_features_from_frame(&frame)
 }
 
 /// Compute statistical features from raw subcarrier amplitudes.
@@ -117,8 +205,8 @@ fn subcarrier_stats(amps: &[f64]) -> (f64, f64, f64, f64, f64, f64, f64, f64) {
 pub struct ClassStats {
     pub label: String,
     pub count: usize,
-    pub mean: [f64; N_FEATURES],
-    pub stddev: [f64; N_FEATURES],
+    pub mean: Vec<f64>,
+    pub stddev: Vec<f64>,
 }
 
 // ── Trained model ────────────────────────────────────────────────────────────
@@ -127,12 +215,12 @@ pub struct ClassStats {
 pub struct AdaptiveModel {
     /// Per-class feature statistics (centroid + spread).
     pub class_stats: Vec<ClassStats>,
-    /// Logistic regression weights: [n_classes x (N_FEATURES + 1)] (last = bias).
+    /// Logistic regression weights: [n_classes x (n_features + 1)] (last = bias).
     /// Dynamic: the outer Vec length equals the number of discovered classes.
     pub weights: Vec<Vec<f64>>,
     /// Global feature normalisation: mean and stddev across all training data.
-    pub global_mean: [f64; N_FEATURES],
-    pub global_std: [f64; N_FEATURES],
+    pub global_mean: Vec<f64>,
+    pub global_std: Vec<f64>,
     /// Training metadata.
     pub trained_frames: usize,
     pub training_accuracy: f64,
@@ -140,11 +228,19 @@ pub struct AdaptiveModel {
     /// Dynamically discovered class names (in index order).
     #[serde(default = "default_class_names")]
     pub class_names: Vec<String>,
+    /// Number of features this model was trained with (15 legacy or 62 multi-node).
+    #[serde(default = "default_n_features")]
+    pub n_features: usize,
 }
 
 /// Backward-compatible fallback for models saved without class_names.
 fn default_class_names() -> Vec<String> {
     DEFAULT_CLASSES.iter().map(|s| s.to_string()).collect()
+}
+
+/// Backward-compatible fallback for models saved without n_features.
+fn default_n_features() -> usize {
+    N_FEATURES
 }
 
 impl Default for AdaptiveModel {
@@ -153,36 +249,40 @@ impl Default for AdaptiveModel {
         Self {
             class_stats: Vec::new(),
             weights: vec![vec![0.0; N_FEATURES + 1]; n_classes],
-            global_mean: [0.0; N_FEATURES],
-            global_std: [1.0; N_FEATURES],
+            global_mean: vec![0.0; N_FEATURES],
+            global_std: vec![1.0; N_FEATURES],
             trained_frames: 0,
             training_accuracy: 0.0,
             version: 1,
             class_names: default_class_names(),
+            n_features: N_FEATURES,
         }
     }
 }
 
 impl AdaptiveModel {
     /// Classify a raw feature vector.  Returns (class_label, confidence).
-    pub fn classify(&self, raw_features: &[f64; N_FEATURES]) -> (String, f64) {
+    /// Accepts any-length slice; uses self.n_features for dimension.
+    pub fn classify(&self, raw_features: &[f64]) -> (String, f64) {
         let n_classes = self.weights.len();
+        let nf = self.n_features;
         if n_classes == 0 || self.class_stats.is_empty() {
             return ("present_still".to_string(), 0.5);
         }
 
         // Normalise features.
-        let mut x = [0.0f64; N_FEATURES];
-        for i in 0..N_FEATURES {
+        let mut x = vec![0.0f64; nf];
+        for i in 0..nf.min(raw_features.len()).min(self.global_mean.len()) {
             x[i] = (raw_features[i] - self.global_mean[i]) / (self.global_std[i] + 1e-9);
         }
 
-        // Compute logits: w·x + b for each class.
+        // Compute logits: w*x + b for each class.
         let mut logits: Vec<f64> = vec![0.0; n_classes];
         for c in 0..n_classes {
             let w = &self.weights[c];
-            let mut z = w[N_FEATURES]; // bias
-            for i in 0..N_FEATURES {
+            let bias_idx = nf.min(w.len().saturating_sub(1));
+            let mut z = if bias_idx < w.len() { w[bias_idx] } else { 0.0 }; // bias
+            for i in 0..nf.min(w.len().saturating_sub(1)) {
                 z += w[i] * x[i];
             }
             logits[c] = z;
@@ -227,7 +327,7 @@ impl AdaptiveModel {
 
 /// A labeled training sample.
 struct Sample {
-    features: [f64; N_FEATURES],
+    features: Vec<f64>,
     class_idx: usize,
 }
 
@@ -239,11 +339,21 @@ fn load_recording(path: &Path, class_idx: usize) -> Vec<Sample> {
     };
     content.lines().filter_map(|line| {
         let v: serde_json::Value = serde_json::from_str(line).ok()?;
-        // Use extended features (server features + subcarrier stats).
-        Some(Sample {
-            features: features_from_frame(&v),
-            class_idx,
-        })
+
+        // Try multi-node features first (new format with node_features).
+        let has_node_features = v.get("node_features")
+            .and_then(|nf| nf.as_array())
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false);
+
+        let features = if has_node_features {
+            multi_features_from_frame(&v)
+        } else {
+            // Fall back to legacy 15-feature extraction.
+            features_from_frame(&v).to_vec()
+        };
+
+        Some(Sample { features, class_idx })
     }).collect()
 }
 
@@ -276,11 +386,11 @@ fn classify_recording_name(name: &str) -> Option<String> {
 ///
 /// Recordings are matched to classes by filename pattern. Classes are discovered
 /// dynamically from the training data filenames:
-/// - `*empty*` / `*absent*`   → absent
-/// - `*still*` / `*sitting*`  → present_still
-/// - `*walking*` / `*moving*` → present_moving
-/// - `*active*` / `*exercise*`→ active
-/// - Any other `train_<class>_*.jsonl` → <class>
+/// - `*empty*` / `*absent*`   -> absent
+/// - `*still*` / `*sitting*`  -> present_still
+/// - `*walking*` / `*moving*` -> present_moving
+/// - `*active*` / `*exercise*`-> active
+/// - Any other `train_<class>_*.jsonl` -> <class>
 pub fn train_from_recordings(recordings_dir: &Path) -> Result<AdaptiveModel, String> {
     // First pass: scan filenames to discover all unique class names.
     let entries: Vec<_> = std::fs::read_dir(recordings_dir)
@@ -318,7 +428,7 @@ pub fn train_from_recordings(recordings_dir: &Path) -> Result<AdaptiveModel, Str
     for (path, fname, class_name) in &file_classes {
         let class_idx = class_map[class_name];
         let loaded = load_recording(path, class_idx);
-        eprintln!("  Loaded {}: {} frames → class '{}'",
+        eprintln!("  Loaded {}: {} frames -> class '{}'",
                  fname, loaded.len(), class_name);
         samples.extend(loaded);
     }
@@ -328,33 +438,35 @@ pub fn train_from_recordings(recordings_dir: &Path) -> Result<AdaptiveModel, Str
     }
 
     let n = samples.len();
-    eprintln!("Total training samples: {n} across {n_classes} classes: {:?}", class_names);
+    // Detect feature dimensionality from the loaded samples.
+    let n_features = samples.first().map(|s| s.features.len()).unwrap_or(N_FEATURES);
+    eprintln!("Total training samples: {n} across {n_classes} classes: {:?} (n_features={n_features})", class_names);
 
     // ── Compute global normalisation stats ──
-    let mut global_mean = [0.0f64; N_FEATURES];
-    let mut global_var = [0.0f64; N_FEATURES];
+    let mut global_mean = vec![0.0f64; n_features];
+    let mut global_var = vec![0.0f64; n_features];
     for s in &samples {
-        for i in 0..N_FEATURES { global_mean[i] += s.features[i]; }
+        for i in 0..n_features { global_mean[i] += s.features[i]; }
     }
-    for i in 0..N_FEATURES { global_mean[i] /= n as f64; }
+    for i in 0..n_features { global_mean[i] /= n as f64; }
     for s in &samples {
-        for i in 0..N_FEATURES {
+        for i in 0..n_features {
             global_var[i] += (s.features[i] - global_mean[i]).powi(2);
         }
     }
-    let mut global_std = [0.0f64; N_FEATURES];
-    for i in 0..N_FEATURES {
+    let mut global_std = vec![0.0f64; n_features];
+    for i in 0..n_features {
         global_std[i] = (global_var[i] / n as f64).sqrt().max(1e-9);
     }
 
     // ── Compute per-class statistics ──
-    let mut class_sums = vec![[0.0f64; N_FEATURES]; n_classes];
-    let mut class_sq = vec![[0.0f64; N_FEATURES]; n_classes];
+    let mut class_sums = vec![vec![0.0f64; n_features]; n_classes];
+    let mut class_sq = vec![vec![0.0f64; n_features]; n_classes];
     let mut class_counts = vec![0usize; n_classes];
     for s in &samples {
         let c = s.class_idx;
         class_counts[c] += 1;
-        for i in 0..N_FEATURES {
+        for i in 0..n_features {
             class_sums[c][i] += s.features[i];
             class_sq[c][i] += s.features[i] * s.features[i];
         }
@@ -363,9 +475,9 @@ pub fn train_from_recordings(recordings_dir: &Path) -> Result<AdaptiveModel, Str
     let mut class_stats = Vec::new();
     for c in 0..n_classes {
         let cnt = class_counts[c].max(1) as f64;
-        let mut mean = [0.0; N_FEATURES];
-        let mut stddev = [0.0; N_FEATURES];
-        for i in 0..N_FEATURES {
+        let mut mean = vec![0.0; n_features];
+        let mut stddev = vec![0.0; n_features];
+        for i in 0..n_features {
             mean[i] = class_sums[c][i] / cnt;
             stddev[i] = ((class_sq[c][i] / cnt) - mean[i] * mean[i]).max(0.0).sqrt();
         }
@@ -378,16 +490,16 @@ pub fn train_from_recordings(recordings_dir: &Path) -> Result<AdaptiveModel, Str
     }
 
     // ── Normalise all samples ──
-    let mut norm_samples: Vec<([f64; N_FEATURES], usize)> = samples.iter().map(|s| {
-        let mut x = [0.0; N_FEATURES];
-        for i in 0..N_FEATURES {
+    let mut norm_samples: Vec<(Vec<f64>, usize)> = samples.iter().map(|s| {
+        let mut x = vec![0.0; n_features];
+        for i in 0..n_features {
             x[i] = (s.features[i] - global_mean[i]) / (global_std[i] + 1e-9);
         }
         (x, s.class_idx)
     }).collect();
 
     // ── Train logistic regression via mini-batch SGD ──
-    let mut weights: Vec<Vec<f64>> = vec![vec![0.0f64; N_FEATURES + 1]; n_classes];
+    let mut weights: Vec<Vec<f64>> = vec![vec![0.0f64; n_features + 1]; n_classes];
     let lr = 0.1;
     let epochs = 200;
     let batch_size = 32;
@@ -414,14 +526,14 @@ pub fn train_from_recordings(recordings_dir: &Path) -> Result<AdaptiveModel, Str
             let batch = &norm_samples[batch_start..batch_end];
 
             // Accumulate gradients.
-            let mut grad: Vec<Vec<f64>> = vec![vec![0.0f64; N_FEATURES + 1]; n_classes];
+            let mut grad: Vec<Vec<f64>> = vec![vec![0.0f64; n_features + 1]; n_classes];
 
             for (x, target) in batch {
                 // Forward: softmax.
                 let mut logits: Vec<f64> = vec![0.0; n_classes];
                 for c in 0..n_classes {
-                    logits[c] = weights[c][N_FEATURES]; // bias
-                    for i in 0..N_FEATURES {
+                    logits[c] = weights[c][n_features]; // bias
+                    for i in 0..n_features {
                         logits[c] += weights[c][i] * x[i];
                     }
                 }
@@ -438,10 +550,10 @@ pub fn train_from_recordings(recordings_dir: &Path) -> Result<AdaptiveModel, Str
                 // Gradient: prob - one_hot(target).
                 for c in 0..n_classes {
                     let delta = probs[c] - if c == *target { 1.0 } else { 0.0 };
-                    for i in 0..N_FEATURES {
+                    for i in 0..n_features {
                         grad[c][i] += delta * x[i];
                     }
-                    grad[c][N_FEATURES] += delta; // bias grad
+                    grad[c][n_features] += delta; // bias grad
                 }
             }
 
@@ -449,7 +561,7 @@ pub fn train_from_recordings(recordings_dir: &Path) -> Result<AdaptiveModel, Str
             let bs = batch.len() as f64;
             let current_lr = lr * (1.0 - epoch as f64 / epochs as f64); // linear decay
             for c in 0..n_classes {
-                for i in 0..=N_FEATURES {
+                for i in 0..=n_features {
                     weights[c][i] -= current_lr * grad[c][i] / bs;
                 }
             }
@@ -467,8 +579,8 @@ pub fn train_from_recordings(recordings_dir: &Path) -> Result<AdaptiveModel, Str
     for (x, target) in &norm_samples {
         let mut logits: Vec<f64> = vec![0.0; n_classes];
         for c in 0..n_classes {
-            logits[c] = weights[c][N_FEATURES];
-            for i in 0..N_FEATURES {
+            logits[c] = weights[c][n_features];
+            for i in 0..n_features {
                 logits[c] += weights[c][i] * x[i];
             }
         }
@@ -487,8 +599,8 @@ pub fn train_from_recordings(recordings_dir: &Path) -> Result<AdaptiveModel, Str
         class_total[*target] += 1;
         let mut logits: Vec<f64> = vec![0.0; n_classes];
         for c in 0..n_classes {
-            logits[c] = weights[c][N_FEATURES];
-            for i in 0..N_FEATURES {
+            logits[c] = weights[c][n_features];
+            for i in 0..n_features {
                 logits[c] += weights[c][i] * x[i];
             }
         }
@@ -512,6 +624,7 @@ pub fn train_from_recordings(recordings_dir: &Path) -> Result<AdaptiveModel, Str
         training_accuracy: accuracy,
         version: 1,
         class_names,
+        n_features,
     })
 }
 

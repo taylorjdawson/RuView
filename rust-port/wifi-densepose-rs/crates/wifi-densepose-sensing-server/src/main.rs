@@ -1195,32 +1195,63 @@ fn build_per_node_features(node_states: &HashMap<u8, NodeState>) -> Vec<PerNodeF
 }
 
 /// If an adaptive model is loaded, override the classification with the
-/// model's prediction.  Uses the full 15-feature vector for higher accuracy.
+/// model's prediction.  Uses multi-node features (62-dim) when the model was
+/// trained with them and node_states are available, otherwise falls back to
+/// the legacy 15-feature vector.
 fn adaptive_override(state: &AppStateInner, features: &FeatureInfo, classification: &mut ClassificationInfo) {
     if let Some(ref model) = state.adaptive_model {
-        // Get current frame amplitudes from the latest history entry.
-        let amps = state.frame_history.back()
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        let feat_arr = adaptive_classifier::features_from_runtime(
-            &serde_json::json!({
-                "variance": features.variance,
-                "motion_band_power": features.motion_band_power,
-                "breathing_band_power": features.breathing_band_power,
-                "spectral_power": features.spectral_power,
-                "dominant_freq_hz": features.dominant_freq_hz,
-                "change_points": features.change_points,
-                "mean_rssi": features.mean_rssi,
-            }),
-            amps,
-        );
-        let (label, conf) = model.classify(&feat_arr);
+        // Build the feature vector matching the model's trained dimension.
+        let feat_vec = if model.n_features > N_FEATURES_LEGACY && !state.node_states.is_empty() {
+            // Multi-node model: build per-node JSON array from live NodeStates.
+            let now = std::time::Instant::now();
+            let mut node_arr: Vec<serde_json::Value> = state.node_states.values()
+                .filter(|ns| now.duration_since(ns.last_seen).as_secs() < 5)
+                .filter_map(|ns| {
+                    let f = ns.latest_features.as_ref()?;
+                    Some(serde_json::json!({
+                        "node_id": ns.node_id,
+                        "rssi_dbm": ns.rssi_history.back().copied().unwrap_or(f.mean_rssi),
+                        "features": {
+                            "variance": f.variance,
+                            "motion_band_power": f.motion_band_power,
+                            "breathing_band_power": f.breathing_band_power,
+                            "spectral_power": f.spectral_power,
+                            "dominant_freq_hz": f.dominant_freq_hz,
+                            "change_points": f.change_points,
+                        }
+                    }))
+                })
+                .collect();
+            node_arr.sort_by_key(|n| n.get("node_id").and_then(|v| v.as_u64()).unwrap_or(255));
+            adaptive_classifier::multi_features_from_runtime(&serde_json::Value::Array(node_arr))
+        } else {
+            // Legacy 15-feature model or no node_states available.
+            let amps = state.frame_history.back()
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            adaptive_classifier::features_from_runtime(
+                &serde_json::json!({
+                    "variance": features.variance,
+                    "motion_band_power": features.motion_band_power,
+                    "breathing_band_power": features.breathing_band_power,
+                    "spectral_power": features.spectral_power,
+                    "dominant_freq_hz": features.dominant_freq_hz,
+                    "change_points": features.change_points,
+                    "mean_rssi": features.mean_rssi,
+                }),
+                amps,
+            )
+        };
+        let (label, conf) = model.classify(&feat_vec);
         classification.motion_level = label.to_string();
         classification.presence = label != "absent";
         // Blend model confidence with existing smoothed confidence.
         classification.confidence = (conf * 0.7 + classification.confidence * 0.3).clamp(0.0, 1.0);
     }
 }
+
+/// Legacy feature count used to detect old vs new models at runtime.
+const N_FEATURES_LEGACY: usize = 15;
 
 /// Size of the median filter window for vital signs outlier rejection.
 const VITAL_MEDIAN_WINDOW: usize = 21;
@@ -2796,7 +2827,7 @@ async fn adaptive_status(State(state): State<SharedState>) -> Json<serde_json::V
             "trained_frames": model.trained_frames,
             "accuracy": model.training_accuracy,
             "version": model.version,
-            "classes": adaptive_classifier::CLASSES,
+            "classes": model.class_names,
             "class_stats": model.class_stats,
         })),
         None => Json(serde_json::json!({
