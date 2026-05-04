@@ -45,6 +45,14 @@ should bump it before each release.
 > Skipping this step and OTA-pushing straight to a vanilla node is the
 > failure mode this hardening is designed to prevent.
 
+> **Stock firmware built before this PR uses a 900 KB OTA slot layout;
+> the hardened firmware is ~1.1 MB. OTA only rewrites the app
+> partition — it cannot grow it.** So stock → hardened *must* be USB.
+> Once a node is on hardened firmware (2 MiB slots), all later updates
+> can be OTA. You'll see this on a stock node's `/ota/status`:
+> `"max_size":921600` (~900 KB) — anything larger than that is rejected
+> by the OTA endpoint with HTTP 413 / "image too large".
+
 For each physical device:
 
 1. Plug the node in over USB-C, identify the port (`COM7`, `/dev/cu.usbmodem*`).
