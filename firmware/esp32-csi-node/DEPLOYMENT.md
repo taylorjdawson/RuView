@@ -172,7 +172,116 @@ All exposed via `idf.py menuconfig` → "Boot Health & Watchdog":
 
 ---
 
-## 8. Verification before declaring a deploy "done"
+## 8. Remote deploy via a home server (recommended for ongoing iteration)
+
+Once the fleet is hardened, the cleanest way to push firmware updates is
+*from a server that lives on the same LAN as the nodes*. You SSH into the
+server from anywhere, build the firmware there, and `curl` it to the
+nodes — no need to be physically present.
+
+### 8.1 Topology
+
+```
+your laptop (anywhere)         home LAN
++----------+    SSH     +-------------------+    HTTP :8032/ota   +---------+
+| laptop   | ---------> | home-server       | ------------------> | esp32-* |
+| (no esp  |            | - docker          |                     +---------+
+|  tools)  |            | - git clone repo  |
++----------+            | - curl            |
+                        +-------------------+
+```
+
+Nothing on the ESP32 side changes. The server is just a build + push host
+sitting inside the trust zone.
+
+### 8.2 One-time server setup
+
+On each server you might want to deploy from:
+
+```sh
+# Prereqs (Ubuntu/Debian — adjust for other distros):
+sudo apt update
+sudo apt install -y docker.io git curl
+sudo usermod -aG docker $USER   # so docker works without sudo; re-login after
+
+# Clone the repo:
+mkdir -p ~/src && cd ~/src
+git clone https://github.com/taylorjdawson/RuView.git
+cd RuView
+
+# Pull the ESP-IDF image once (~2.5 GB, takes a few min):
+docker pull espressif/idf:release-v5.4
+```
+
+That's it — no native ESP-IDF install, no Python venv juggling.
+
+### 8.3 Per-deployment workflow
+
+```sh
+# SSH in:
+ssh user@home-server
+
+cd ~/src/RuView
+git pull
+
+# Build (~5 min cold cache, ~30 s incremental):
+docker run --rm \
+    -v "$PWD/firmware/esp32-csi-node:/project" \
+    -w /project \
+    espressif/idf:release-v5.4 \
+    idf.py build
+
+# Push to all four nodes:
+FW=firmware/esp32-csi-node/build/esp32-csi-node.bin
+for ip in 192.168.0.75 192.168.0.76 192.168.0.77 192.168.0.78 192.168.0.86; do
+    echo "=== $ip ==="
+    curl -sS -X POST --data-binary @"$FW" \
+         -H "Content-Type: application/octet-stream" \
+         "http://$ip:8032/ota"
+    echo
+done
+
+# Verify each came back on the other partition:
+for ip in 192.168.0.75 192.168.0.76 192.168.0.77 192.168.0.78 192.168.0.86; do
+    sleep 8  # let it reboot + reconnect
+    echo -n "$ip: "
+    curl -sS --max-time 3 "http://$ip:8032/ota/status" || echo unreachable
+done
+```
+
+### 8.4 Helper script
+
+A wrapped version is checked in at `scripts/deploy-firmware.sh`. From the
+repo root on the home server:
+
+```sh
+./scripts/deploy-firmware.sh                              # build + push to default fleet
+./scripts/deploy-firmware.sh 192.168.0.86                 # build + push to one node
+./scripts/deploy-firmware.sh --skip-build 192.168.0.86    # push existing build, no rebuild
+./scripts/deploy-firmware.sh --verify-only                # just hit /ota/status on each node
+```
+
+### 8.5 Rollout safety on the fleet
+
+When pushing to multiple nodes, do one first and verify it returned a
+clean `mode=normal` status before continuing. If one node fails to come
+back, **stop the rollout** — investigate that node before pushing the
+same firmware to the rest. The boot-health safety net is per-node, so a
+buggy firmware will trip safe mode on each node independently if you
+fan out blindly.
+
+A conservative pattern when iterating on something risky:
+
+```sh
+./scripts/deploy-firmware.sh 192.168.0.86          # canary
+sleep 60 && curl http://192.168.0.86:8032/ota/status   # let stability timer fire
+# only then:
+./scripts/deploy-firmware.sh 192.168.0.75 192.168.0.76 192.168.0.77 192.168.0.78
+```
+
+---
+
+## 9. Verification before declaring a deploy "done"
 
 For every fleet-wide rollout:
 
