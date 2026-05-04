@@ -21,6 +21,10 @@
 
 #if defined(CONFIG_WASM_ENABLE)
 
+#include <errno.h>
+#include <stdlib.h>
+
+#include "ota_update.h"
 #include "wasm_runtime.h"
 #include "rvf_parser.h"
 #include "nvs_config.h"
@@ -78,12 +82,21 @@ static uint8_t *receive_body(httpd_req_t *req, int *out_len)
     return buf;
 }
 
+static esp_err_t wasm_require_control_auth(httpd_req_t *req, const char *action_name)
+{
+    return ota_update_require_auth(req, action_name);
+}
+
 /* ======================================================================
  * POST /wasm/upload — Upload RVF or raw .wasm
  * ====================================================================== */
 
 static esp_err_t wasm_upload_handler(httpd_req_t *req)
 {
+    if (wasm_require_control_auth(req, "WASM upload") != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     int total = 0;
     uint8_t *buf = receive_body(req, &total);
     if (buf == NULL) return ESP_FAIL;
@@ -278,15 +291,36 @@ static esp_err_t wasm_list_handler(httpd_req_t *req)
 
 static int parse_module_id_from_uri(const char *uri, const char *prefix)
 {
+    if (uri == NULL || prefix == NULL) {
+        return -1;
+    }
+
+    size_t prefix_len = strlen(prefix);
+    if (strncmp(uri, prefix, prefix_len) != 0) {
+        return -1;
+    }
+
     const char *id_str = uri + strlen(prefix);
     if (*id_str == '\0') return -1;
-    int id = atoi(id_str);
-    if (id < 0 || id >= WASM_MAX_MODULES) return -1;
-    return id;
+
+    errno = 0;
+    char *endptr = NULL;
+    long id = strtol(id_str, &endptr, 10);
+    if (errno != 0 || endptr == id_str || *endptr != '\0') {
+        return -1;
+    }
+    if (id < 0 || id >= WASM_MAX_MODULES) {
+        return -1;
+    }
+    return (int)id;
 }
 
 static esp_err_t wasm_start_handler(httpd_req_t *req)
 {
+    if (wasm_require_control_auth(req, "WASM start") != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     int id = parse_module_id_from_uri(req->uri, "/wasm/start/");
     if (id < 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid module ID");
@@ -313,6 +347,10 @@ static esp_err_t wasm_start_handler(httpd_req_t *req)
 
 static esp_err_t wasm_stop_handler(httpd_req_t *req)
 {
+    if (wasm_require_control_auth(req, "WASM stop") != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     int id = parse_module_id_from_uri(req->uri, "/wasm/stop/");
     if (id < 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid module ID");
@@ -339,6 +377,10 @@ static esp_err_t wasm_stop_handler(httpd_req_t *req)
 
 static esp_err_t wasm_delete_handler(httpd_req_t *req)
 {
+    if (wasm_require_control_auth(req, "WASM unload") != ESP_OK) {
+        return ESP_FAIL;
+    }
+
     int id = parse_module_id_from_uri(req->uri, "/wasm/");
     if (id < 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid module ID");

@@ -1,0 +1,8 @@
+fuzz_serialize
+fuzz_edge
+fuzz_nvs
+test_boot_health
+*.dSYM/
+corpus_serialize/
+corpus_edge/
+corpus_nvs/

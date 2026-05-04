@@ -16,6 +16,7 @@
 #include "stream_sender.h"
 #include "edge_processing.h"
 
+#include <inttypes.h>
 #include <string.h>
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -42,6 +43,9 @@ static uint32_t s_cb_count = 0;
 static uint32_t s_send_ok = 0;
 static uint32_t s_send_fail = 0;
 static uint32_t s_rate_skip = 0;
+static bool s_capture_initialized = false;
+static bool s_capture_paused = false;
+static bool s_hop_timer_paused = false;
 
 /**
  * Minimum interval between UDP sends in microseconds.
@@ -68,6 +72,62 @@ static uint8_t  s_hop_index   = 0;
 
 /** Handle for the periodic hop timer. NULL when timer is not running. */
 static esp_timer_handle_t s_hop_timer = NULL;
+
+static void wifi_csi_callback(void *ctx, wifi_csi_info_t *info);
+static void wifi_promiscuous_cb(void *buf, wifi_promiscuous_pkt_type_t type);
+
+static esp_err_t csi_apply_runtime_capture(void)
+{
+    wifi_promiscuous_filter_t filt = {
+        .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA,
+    };
+    wifi_csi_config_t csi_config = {
+        .lltf_en = true,
+        .htltf_en = true,
+        .stbc_htltf2_en = true,
+        .ltf_merge_en = true,
+        .channel_filter_en = false,
+        .manu_scale = false,
+        .shift = false,
+    };
+
+    esp_err_t err = esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_wifi_set_promiscuous_filter(&filt);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_wifi_set_promiscuous(true);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_wifi_set_csi_config(&csi_config);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_wifi_set_csi_rx_cb(wifi_csi_callback, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return esp_wifi_set_csi(true);
+}
+
+static void csi_resume_hop_timer_if_needed(void)
+{
+    if (!s_hop_timer_paused || s_hop_timer == NULL) {
+        return;
+    }
+
+    esp_err_t err = esp_timer_start_periodic(s_hop_timer, (uint64_t)s_dwell_ms * 1000ULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to resume hop timer after OTA: %s", esp_err_to_name(err));
+        return;
+    }
+
+    s_hop_timer_paused = false;
+}
 
 /**
  * Serialize CSI data into ADR-018 V2 binary frame format.
@@ -147,7 +207,7 @@ size_t csi_serialize_frame(const wifi_csi_info_t *info, uint8_t *buf, size_t buf
     /* Source MAC address (6 bytes, network byte order) — V2 extension */
     memcpy(&buf[20], info->mac, 6);
 
-    ESP_LOGD(TAG, "V2 frame: node=%u mac=%02x:%02x:%02x:%02x:%02x:%02x seq=%u",
+    ESP_LOGD(TAG, "V2 frame: node=%u mac=%02x:%02x:%02x:%02x:%02x:%02x seq=%" PRIu32,
              g_nvs_config.node_id,
              info->mac[0], info->mac[1], info->mac[2],
              info->mac[3], info->mac[4], info->mac[5],
@@ -248,32 +308,11 @@ void csi_collector_init(void)
     /* Update the hop table's first channel to match. */
     s_hop_channels[0] = csi_channel;
 
-    /* Enable promiscuous mode — required for reliable CSI callbacks.
-     * Without this, CSI only fires on frames destined to this station,
-     * which may be very infrequent on a quiet network. */
-    ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
-    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_rx_cb(wifi_promiscuous_cb));
-
-    wifi_promiscuous_filter_t filt = {
-        .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA,
-    };
-    ESP_ERROR_CHECK(esp_wifi_set_promiscuous_filter(&filt));
+    ESP_ERROR_CHECK(csi_apply_runtime_capture());
+    s_capture_initialized = true;
+    s_capture_paused = false;
 
     ESP_LOGI(TAG, "Promiscuous mode enabled for CSI capture");
-
-    wifi_csi_config_t csi_config = {
-        .lltf_en = true,
-        .htltf_en = true,
-        .stbc_htltf2_en = true,
-        .ltf_merge_en = true,
-        .channel_filter_en = false,
-        .manu_scale = false,
-        .shift = false,
-    };
-
-    ESP_ERROR_CHECK(esp_wifi_set_csi_config(&csi_config));
-    ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(wifi_csi_callback, NULL));
-    ESP_ERROR_CHECK(esp_wifi_set_csi(true));
 
     if (g_nvs_config.filter_mac_set) {
         ESP_LOGI(TAG, "MAC filter active: %02x:%02x:%02x:%02x:%02x:%02x",
@@ -284,6 +323,55 @@ void csi_collector_init(void)
 
     ESP_LOGI(TAG, "CSI collection initialized (node_id=%d, channel=%u)",
              g_nvs_config.node_id, (unsigned)csi_channel);
+}
+
+esp_err_t csi_collector_pause(void)
+{
+    if (!s_capture_initialized || s_capture_paused) {
+        return ESP_OK;
+    }
+
+    if (s_hop_timer != NULL && esp_timer_is_active(s_hop_timer)) {
+        esp_err_t err = esp_timer_stop(s_hop_timer);
+        if (err != ESP_OK) {
+            return err;
+        }
+        s_hop_timer_paused = true;
+    }
+
+    esp_err_t err = esp_wifi_set_csi(false);
+    if (err != ESP_OK) {
+        csi_resume_hop_timer_if_needed();
+        return err;
+    }
+
+    err = esp_wifi_set_promiscuous(false);
+    if (err != ESP_OK) {
+        (void)esp_wifi_set_csi(true);
+        csi_resume_hop_timer_if_needed();
+        return err;
+    }
+
+    s_capture_paused = true;
+    ESP_LOGI(TAG, "CSI capture paused for OTA");
+    return ESP_OK;
+}
+
+esp_err_t csi_collector_resume(void)
+{
+    if (!s_capture_initialized || !s_capture_paused) {
+        return ESP_OK;
+    }
+
+    esp_err_t err = csi_apply_runtime_capture();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    s_capture_paused = false;
+    csi_resume_hop_timer_if_needed();
+    ESP_LOGI(TAG, "CSI capture resumed after OTA");
+    return ESP_OK;
 }
 
 /* ---- ADR-029: Channel hopping ---- */

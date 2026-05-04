@@ -37,9 +37,12 @@ MAIN_DIR  = ../main
 FUZZ_DURATION ?= 30
 FUZZ_JOBS     ?= 1
 
-.PHONY: all clean run_serialize run_edge run_nvs run_all
+.PHONY: all clean run_serialize run_edge run_nvs run_all run_boot_health test
 
-all: fuzz_serialize fuzz_edge fuzz_nvs
+all: fuzz_serialize fuzz_edge fuzz_nvs test_boot_health
+
+test: test_boot_health
+	./test_boot_health
 
 # --- Serialize fuzzer ---
 # Tests csi_serialize_frame() with random wifi_csi_info_t inputs.
@@ -59,6 +62,21 @@ fuzz_edge: fuzz_edge_enqueue.c $(STUBS_SRC)
 fuzz_nvs: fuzz_nvs_config.c $(STUBS_SRC)
 	$(CC) $(CFLAGS) $^ -o $@ -lm
 
+# --- Boot health unit test ---
+# Compiles the real boot_health.c against the writable in-memory NVS stub
+# and the controllable esp_reset_reason() in esp_stubs.c. No libFuzzer.
+TEST_CFLAGS = -g -O0 -Istubs -I../main \
+              -DCONFIG_CSI_NODE_ID=1 \
+              -DCONFIG_CSI_WIFI_CHANNEL=6 \
+              -DCONFIG_CSI_WIFI_SSID=\"test\" \
+              -DCONFIG_CSI_TARGET_IP=\"192.168.1.1\" \
+              -DCONFIG_CSI_TARGET_PORT=5500 \
+              -DCONFIG_BOOT_SAFE_MODE_THRESHOLD=5 \
+              -Wall -Wno-unused-function
+
+test_boot_health: test_boot_health.c $(MAIN_DIR)/boot_health.c $(STUBS_SRC)
+	$(CC) $(TEST_CFLAGS) $^ -o $@
+
 # --- Run targets ---
 run_serialize: fuzz_serialize
 	@mkdir -p corpus_serialize
@@ -74,6 +92,9 @@ run_nvs: fuzz_nvs
 
 run_all: run_serialize run_edge run_nvs
 
+run_boot_health: test_boot_health
+	./test_boot_health
+
 clean:
-	rm -f fuzz_serialize fuzz_edge fuzz_nvs
+	rm -f fuzz_serialize fuzz_edge fuzz_nvs test_boot_health
 	rm -rf corpus_serialize/ corpus_edge/ corpus_nvs/

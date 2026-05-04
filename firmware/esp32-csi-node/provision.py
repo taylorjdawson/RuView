@@ -17,6 +17,7 @@ import argparse
 import csv
 import io
 import os
+import secrets
 import struct
 import subprocess
 import sys
@@ -71,6 +72,17 @@ def build_nvs_csv(args):
         mac_bytes = bytes(int(b, 16) for b in args.filter_mac.split(":"))
         # NVS blob: write as hex-encoded string for CSV compatibility
         writer.writerow(["filter_mac", "data", "hex2bin", mac_bytes.hex()])
+    # Piezo speaker control
+    if args.piezo_gpio is not None:
+        writer.writerow(["piezo_gpio", "data", "u8", str(args.piezo_gpio)])
+    if args.piezo_freq is not None:
+        writer.writerow(["piezo_freq", "data", "u16", str(args.piezo_freq)])
+    if args.piezo_ms is not None:
+        writer.writerow(["piezo_ms", "data", "u16", str(args.piezo_ms)])
+    if args.piezo_gap is not None:
+        writer.writerow(["piezo_gap", "data", "u16", str(args.piezo_gap)])
+    if args.piezo_duty is not None:
+        writer.writerow(["piezo_duty", "data", "u8", str(args.piezo_duty)])
     # ADR-073: Multi-frequency channel hopping
     if args.hop_channels is not None:
         channels = [int(c.strip()) for c in args.hop_channels.split(",")]
@@ -90,7 +102,29 @@ def build_nvs_csv(args):
         writer.writerow(["swarm_hb", "data", "u16", str(args.swarm_hb)])
     if args.swarm_ingest is not None:
         writer.writerow(["swarm_ingest", "data", "u16", str(args.swarm_ingest)])
+    # OTA bearer PSK — written to a separate "security" namespace that
+    # ota_update.c reads on startup. Empty string disables auth.
+    if args.ota_psk is not None:
+        writer.writerow(["security", "namespace", "", ""])
+        writer.writerow(["ota_psk", "data", "string", args.ota_psk])
     return buf.getvalue()
+
+
+def resolve_ota_psk(value):
+    """Resolve --ota-psk: 'auto' generates a random 64-char hex token (printed
+    once), anything else is used verbatim and must be 16-64 chars."""
+    if value is None:
+        return None
+    if value == "auto":
+        psk = secrets.token_hex(32)  # 64 hex chars = 256 bits of entropy
+        print(f"  Generated OTA PSK: {psk}")
+        print(f"  >>> SAVE THIS NOW. It cannot be recovered from the device. <<<")
+        return psk
+    if len(value) < 16:
+        raise ValueError(f"--ota-psk must be at least 16 chars, got {len(value)}")
+    if len(value) > 64:
+        raise ValueError(f"--ota-psk must be at most 64 chars, got {len(value)}")
+    return value
 
 
 def generate_nvs_binary(csv_content, size):
@@ -189,6 +223,12 @@ def main():
     parser.add_argument("--channel", type=int, help="CSI channel (1-14 for 2.4GHz, 36-177 for 5GHz). "
                         "Overrides auto-detection from connected AP.")
     parser.add_argument("--filter-mac", type=str, help="MAC address to filter CSI frames (AA:BB:CC:DD:EE:FF)")
+    # Piezo speaker control
+    parser.add_argument("--piezo-gpio", type=int, help="Piezo PWM GPIO (0-48, or 255 to disable)")
+    parser.add_argument("--piezo-freq", type=int, help="Default piezo tone frequency in Hz")
+    parser.add_argument("--piezo-ms", type=int, help="Default piezo tone duration in milliseconds")
+    parser.add_argument("--piezo-gap", type=int, help="Default gap between repeated chirps in milliseconds")
+    parser.add_argument("--piezo-duty", type=int, help="Default piezo PWM duty cycle percentage (1-90)")
     # ADR-073: Multi-frequency channel hopping
     parser.add_argument("--hop-channels", type=str, help="Comma-separated channel list for hopping (e.g. '1,6,11')")
     parser.add_argument("--hop-dwell", type=int, default=200, help="Dwell time per channel in ms (default: 200)")
@@ -198,6 +238,12 @@ def main():
     parser.add_argument("--zone", type=str, help="Zone name for this node (e.g. lobby, hallway)")
     parser.add_argument("--swarm-hb", type=int, help="Swarm heartbeat interval in seconds (default 30)")
     parser.add_argument("--swarm-ingest", type=int, help="Swarm vector ingest interval in seconds (default 5)")
+    # OTA authentication
+    parser.add_argument("--ota-psk", type=str,
+                        help="OTA bearer pre-shared key. Pass 'auto' to generate a random 256-bit "
+                             "token (printed once, save it!) or provide a 16-64 char string. "
+                             "NOTE: provision.py replaces the entire NVS partition, so include "
+                             "this flag on every run or the PSK will be lost.")
     parser.add_argument("--dry-run", action="store_true", help="Generate NVS binary but don't flash")
 
     args = parser.parse_args()
@@ -210,7 +256,11 @@ def main():
         args.fall_thresh is not None, args.vital_win is not None,
         args.vital_int is not None, args.subk_count is not None,
         args.channel is not None, args.filter_mac is not None,
+        args.piezo_gpio is not None, args.piezo_freq is not None,
+        args.piezo_ms is not None, args.piezo_gap is not None,
+        args.piezo_duty is not None,
         args.seed_url is not None, args.zone is not None,
+        args.ota_psk is not None,
     ])
     if not has_value:
         parser.error("At least one config value must be specified")
@@ -236,6 +286,23 @@ def main():
                     raise ValueError
         except ValueError:
             parser.error(f"--filter-mac contains invalid hex bytes: '{args.filter_mac}'")
+    if args.piezo_gpio is not None and not ((0 <= args.piezo_gpio <= 48) or args.piezo_gpio == 255):
+        parser.error(f"--piezo-gpio must be 0-48 or 255 to disable, got {args.piezo_gpio}")
+    if args.piezo_freq is not None and not (100 <= args.piezo_freq <= 20000):
+        parser.error(f"--piezo-freq must be 100-20000 Hz, got {args.piezo_freq}")
+    if args.piezo_ms is not None and not (10 <= args.piezo_ms <= 60000):
+        parser.error(f"--piezo-ms must be 10-60000 ms, got {args.piezo_ms}")
+    if args.piezo_gap is not None and not (10 <= args.piezo_gap <= 60000):
+        parser.error(f"--piezo-gap must be 10-60000 ms, got {args.piezo_gap}")
+    if args.piezo_duty is not None and not (1 <= args.piezo_duty <= 90):
+        parser.error(f"--piezo-duty must be 1-90, got {args.piezo_duty}")
+
+    # OTA PSK: resolve 'auto'/'clear'/explicit, then re-bind to args for downstream use.
+    if args.ota_psk is not None:
+        try:
+            args.ota_psk = resolve_ota_psk(args.ota_psk)
+        except ValueError as e:
+            parser.error(str(e))
 
     print("Building NVS configuration:")
     if args.ssid:
@@ -267,6 +334,16 @@ def main():
         print(f"  CSI Channel:   {args.channel}")
     if args.filter_mac is not None:
         print(f"  Filter MAC:    {args.filter_mac}")
+    if args.piezo_gpio is not None:
+        print(f"  Piezo GPIO:    {args.piezo_gpio}")
+    if args.piezo_freq is not None:
+        print(f"  Piezo Freq:    {args.piezo_freq} Hz")
+    if args.piezo_ms is not None:
+        print(f"  Piezo Duration:{args.piezo_ms} ms")
+    if args.piezo_gap is not None:
+        print(f"  Piezo Gap:     {args.piezo_gap} ms")
+    if args.piezo_duty is not None:
+        print(f"  Piezo Duty:    {args.piezo_duty}%")
     if args.seed_url is not None:
         print(f"  Seed URL:      {args.seed_url}")
     if args.zone is not None:
@@ -275,6 +352,8 @@ def main():
         print(f"  Swarm HB:      {args.swarm_hb}s")
     if args.swarm_ingest is not None:
         print(f"  Swarm Ingest:  {args.swarm_ingest}s")
+    if args.ota_psk is not None:
+        print(f"  OTA PSK:       <{len(args.ota_psk)} chars, masked>")
 
     csv_content = build_nvs_csv(args)
 

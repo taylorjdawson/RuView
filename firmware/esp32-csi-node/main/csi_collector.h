@@ -36,6 +36,25 @@
 void csi_collector_init(void);
 
 /**
+ * Temporarily pause CSI capture and related background load.
+ *
+ * Used by OTA to reduce contention on CPU0 while a firmware upload is in
+ * progress. Safe to call multiple times.
+ *
+ * @return ESP_OK on success.
+ */
+esp_err_t csi_collector_pause(void);
+
+/**
+ * Resume CSI capture after a previous pause.
+ *
+ * Safe to call when capture is already running.
+ *
+ * @return ESP_OK on success.
+ */
+esp_err_t csi_collector_resume(void);
+
+/**
  * Serialize CSI data into ADR-018 binary frame format.
  *
  * @param info   WiFi CSI info from the ESP-IDF callback.

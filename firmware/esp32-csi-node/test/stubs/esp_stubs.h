@@ -23,6 +23,28 @@ typedef int esp_err_t;
 #define ESP_ERR_NO_MEM      0x101
 #define ESP_ERR_INVALID_ARG 0x102
 #define ESP_ERR_NOT_FOUND   0x105
+#define ESP_ERR_NOT_SUPPORTED 0x106
+
+/* ---- esp_system.h ---- */
+typedef enum {
+    ESP_RST_UNKNOWN  = 0,
+    ESP_RST_POWERON  = 1,
+    ESP_RST_EXT      = 2,
+    ESP_RST_SW       = 3,
+    ESP_RST_PANIC    = 4,
+    ESP_RST_INT_WDT  = 5,
+    ESP_RST_TASK_WDT = 6,
+    ESP_RST_WDT      = 7,
+    ESP_RST_DEEPSLEEP = 8,
+    ESP_RST_BROWNOUT = 9,
+    ESP_RST_SDIO     = 10,
+} esp_reset_reason_t;
+
+esp_reset_reason_t esp_reset_reason(void);
+
+/* Test helpers — only meaningful in host builds. */
+void _test_set_reset_reason(esp_reset_reason_t r);
+void _test_nvs_clear(void);
 
 /* ---- esp_log.h ---- */
 #define ESP_LOGI(tag, fmt, ...)  ((void)0)
@@ -59,6 +81,8 @@ static inline esp_err_t esp_timer_start_periodic(esp_timer_handle_t h, uint64_t 
 }
 static inline esp_err_t esp_timer_stop(esp_timer_handle_t h) { (void)h; return ESP_OK; }
 static inline esp_err_t esp_timer_delete(esp_timer_handle_t h) { (void)h; return ESP_OK; }
+static inline esp_err_t esp_timer_start_once(esp_timer_handle_t h, uint64_t t) { (void)h; (void)t; return ESP_OK; }
+static inline bool      esp_timer_is_active(esp_timer_handle_t h) { (void)h; return false; }
 
 /* ---- esp_wifi_types.h ---- */
 
@@ -164,16 +188,23 @@ static inline esp_err_t esp_wifi_80211_tx(wifi_interface_t ifx, const void *b, i
 static inline esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t *ap) { (void)ap; return ESP_FAIL; }
 static inline const char *esp_err_to_name(esp_err_t code) { (void)code; return "STUB"; }
 
-/* ---- NVS stubs ---- */
+/* ---- NVS stubs ----
+ * Backed by a small in-memory table in esp_stubs.c so boot_health and other
+ * read/write NVS users can be exercised in host tests. Tests reset state via
+ * _test_nvs_clear(). */
 typedef uint32_t nvs_handle_t;
-#define NVS_READONLY 0
-static inline esp_err_t nvs_open(const char *ns, int mode, nvs_handle_t *h) { (void)ns; (void)mode; (void)h; return ESP_FAIL; }
-static inline void nvs_close(nvs_handle_t h) { (void)h; }
-static inline esp_err_t nvs_get_str(nvs_handle_t h, const char *k, char *v, size_t *l) { (void)h; (void)k; (void)v; (void)l; return ESP_FAIL; }
-static inline esp_err_t nvs_get_u8(nvs_handle_t h, const char *k, uint8_t *v) { (void)h; (void)k; (void)v; return ESP_FAIL; }
-static inline esp_err_t nvs_get_u16(nvs_handle_t h, const char *k, uint16_t *v) { (void)h; (void)k; (void)v; return ESP_FAIL; }
-static inline esp_err_t nvs_get_u32(nvs_handle_t h, const char *k, uint32_t *v) { (void)h; (void)k; (void)v; return ESP_FAIL; }
-static inline esp_err_t nvs_get_blob(nvs_handle_t h, const char *k, void *v, size_t *l) { (void)h; (void)k; (void)v; (void)l; return ESP_FAIL; }
+#define NVS_READONLY  0
+#define NVS_READWRITE 1
+
+esp_err_t nvs_open(const char *ns, int mode, nvs_handle_t *h);
+void      nvs_close(nvs_handle_t h);
+esp_err_t nvs_commit(nvs_handle_t h);
+esp_err_t nvs_get_u8(nvs_handle_t h, const char *k, uint8_t *v);
+esp_err_t nvs_set_u8(nvs_handle_t h, const char *k, uint8_t v);
+esp_err_t nvs_get_str(nvs_handle_t h, const char *k, char *v, size_t *l);
+esp_err_t nvs_get_u16(nvs_handle_t h, const char *k, uint16_t *v);
+esp_err_t nvs_get_u32(nvs_handle_t h, const char *k, uint32_t *v);
+esp_err_t nvs_get_blob(nvs_handle_t h, const char *k, void *v, size_t *l);
 
 /* ---- stream_sender stubs (defined in esp_stubs.c) ---- */
 int stream_sender_send(const uint8_t *data, size_t len);

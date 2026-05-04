@@ -65,6 +65,12 @@ esp_err_t swarm_bridge_init(const swarm_config_t *cfg, uint8_t node_id)
         ESP_LOGW(TAG, "seed_url is empty — swarm bridge disabled");
         return ESP_ERR_INVALID_ARG;
     }
+    if (cfg->seed_token[0] != '\0' &&
+        strncmp(cfg->seed_url, "https://", strlen("https://")) != 0)
+    {
+        ESP_LOGE(TAG, "seed_token requires an https:// seed_url");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     memcpy(&s_cfg, cfg, sizeof(s_cfg));
     s_node_id = node_id;
@@ -205,7 +211,13 @@ static void swarm_task(void *arg)
 
     /* Build the full ingest URL once. */
     char url[128];
-    snprintf(url, sizeof(url), "%s%s", s_cfg.seed_url, SWARM_INGEST_PATH);
+    int url_len = snprintf(url, sizeof(url), "%s%s", s_cfg.seed_url, SWARM_INGEST_PATH);
+    if (url_len <= 0 || url_len >= (int)sizeof(url)) {
+        ESP_LOGE(TAG, "seed ingest URL too long");
+        s_cnt_errors++;
+        vTaskDelete(NULL);
+        return;
+    }
 
     /* Create a reusable HTTP client. */
     esp_http_client_config_t http_cfg = {

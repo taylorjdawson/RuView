@@ -32,6 +32,17 @@ static uint32_t s_enomem_suppressed = 0;
 
 static int sender_init_internal(const char *ip, uint16_t port)
 {
+    if (ip == NULL || ip[0] == '\0' || port == 0) {
+        ESP_LOGE(TAG, "Invalid UDP destination: ip=%s port=%u",
+                 (ip != NULL) ? ip : "(null)", (unsigned)port);
+        return -1;
+    }
+
+    if (s_sock >= 0) {
+        close(s_sock);
+        s_sock = -1;
+    }
+
     s_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (s_sock < 0) {
         ESP_LOGE(TAG, "Failed to create socket: errno %d", errno);
@@ -65,7 +76,7 @@ int stream_sender_init_with(const char *ip, uint16_t port)
 
 int stream_sender_send(const uint8_t *data, size_t len)
 {
-    if (s_sock < 0) {
+    if (s_sock < 0 || data == NULL || len == 0) {
         return -1;
     }
 

@@ -22,6 +22,21 @@ extern "C" {
  */
 esp_err_t display_task_start(void);
 
+/**
+ * Suspend the display task during a high-priority maintenance operation such
+ * as OTA. No-op when no display task is active.
+ *
+ * @return ESP_OK on success.
+ */
+esp_err_t display_task_pause(void);
+
+/**
+ * Resume the display task after a previous pause.
+ *
+ * @return ESP_OK on success.
+ */
+esp_err_t display_task_resume(void);
+
 #ifdef __cplusplus
 }
 #endif

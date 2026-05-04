@@ -25,6 +25,8 @@
 #define DISP_V_RES  448
 
 static const char *TAG = "disp_task";
+static TaskHandle_t s_display_task_handle = NULL;
+static bool s_display_task_paused = false;
 
 /* ---- Config ---- */
 #ifdef CONFIG_DISPLAY_FPS_LIMIT
@@ -153,7 +155,7 @@ esp_err_t display_task_start(void)
 
     BaseType_t xret = xTaskCreatePinnedToCore(
         display_task, "display", DISP_TASK_STACK,
-        NULL, DISP_TASK_PRIORITY, NULL, DISP_TASK_CORE);
+        NULL, DISP_TASK_PRIORITY, &s_display_task_handle, DISP_TASK_CORE);
 
     if (xret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create display task");
@@ -165,9 +167,43 @@ esp_err_t display_task_start(void)
     return ESP_OK;
 }
 
+esp_err_t display_task_pause(void)
+{
+    if (s_display_task_handle == NULL || s_display_task_paused) {
+        return ESP_OK;
+    }
+
+    vTaskSuspend(s_display_task_handle);
+    s_display_task_paused = true;
+    ESP_LOGI(TAG, "Display task paused for OTA");
+    return ESP_OK;
+}
+
+esp_err_t display_task_resume(void)
+{
+    if (s_display_task_handle == NULL || !s_display_task_paused) {
+        return ESP_OK;
+    }
+
+    vTaskResume(s_display_task_handle);
+    s_display_task_paused = false;
+    ESP_LOGI(TAG, "Display task resumed after OTA");
+    return ESP_OK;
+}
+
 #else /* !CONFIG_DISPLAY_ENABLE */
 
 esp_err_t display_task_start(void)
+{
+    return ESP_OK;
+}
+
+esp_err_t display_task_pause(void)
+{
+    return ESP_OK;
+}
+
+esp_err_t display_task_resume(void)
 {
     return ESP_OK;
 }

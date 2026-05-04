@@ -274,6 +274,30 @@ I (1023) main: Connected to WiFi
 I (1025) main: CSI streaming active -> 192.168.1.100:5005 (edge_tier=2, OTA=ready, WASM=ready)
 ```
 
+If a piezo is provisioned, the same serial session can trigger tones without WiFi:
+
+```text
+piezo status
+piezo tone 2200 180 40
+piezo pattern 3 2200 120 90 40
+piezo stop
+```
+
+The tone and pattern commands accept optional arguments. When omitted, the firmware falls back to the provisioned defaults.
+
+### Piezo HTTP Control
+
+When the OTA server is running, the speaker is also exposed on port `8032`:
+
+```bash
+curl http://<ESP32_IP>:8032/piezo/status
+curl -X POST "http://<ESP32_IP>:8032/piezo/tone?freq=2200&duration_ms=180&duty=40"
+curl -X POST "http://<ESP32_IP>:8032/piezo/pattern?count=3&freq=2200&on_ms=120&off_ms=90&duty=40"
+curl -X POST http://<ESP32_IP>:8032/piezo/stop
+```
+
+If an OTA PSK is provisioned, the mutating endpoints require the same `Authorization: Bearer <psk>` header as OTA/WASM actions.
+
 ---
 
 ## Runtime Configuration (NVS)
@@ -332,11 +356,21 @@ python scripts/provision.py --port COM7 \
 | `wasm_max` | u8 | `4` | Maximum concurrent WASM module slots (1-8) |
 | `wasm_verify` | u8 | `1` | Require Ed25519 signature verification for uploads |
 
+#### Piezo Speaker Control
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `piezo_gpio` | u8 | `255` | GPIO for piezo PWM output. `255` disables the speaker path. |
+| `piezo_freq` | u16 | `2200` | Default tone frequency in Hz |
+| `piezo_ms` | u16 | `180` | Default tone duration in milliseconds |
+| `piezo_gap` | u16 | `90` | Default gap between repeated chirps in milliseconds |
+| `piezo_duty` | u8 | `40` | Default PWM duty cycle percentage |
+
 ---
 
 ## Kconfig Menus
 
-Three configuration menus are available via `idf.py menuconfig`:
+Four configuration menus are available via `idf.py menuconfig`:
 
 ### "CSI Node Configuration"
 
@@ -349,6 +383,10 @@ Processing tier selection, vitals interval, top-K subcarrier count, fall detecti
 ### "WASM Programmable Sensing (ADR-040)"
 
 Maximum module slots, Ed25519 signature verification toggle, timer interval for `on_timer()` callbacks.
+
+### "Piezo Speaker"
+
+Default GPIO and tone profile for the piezo control plane. Leave the GPIO at `-1` if your board has no speaker attached and provision `piezo_gpio` later over USB when you're ready to test.
 
 ---
 

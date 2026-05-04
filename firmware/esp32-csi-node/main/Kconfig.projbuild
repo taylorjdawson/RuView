@@ -87,6 +87,80 @@ menu "Edge Intelligence (ADR-039)"
 
 endmenu
 
+menu "Piezo Speaker"
+
+    config PIEZO_GPIO
+        int "Piezo GPIO (-1 disables speaker output)"
+        default -1
+        range -1 48
+        help
+            GPIO used for piezo PWM output. Set to -1 to leave the
+            speaker path disabled until an NVS override is provisioned.
+
+    config PIEZO_DEFAULT_FREQ_HZ
+        int "Default piezo frequency (Hz)"
+        default 2200
+        range 100 20000
+
+    config PIEZO_DEFAULT_DURATION_MS
+        int "Default piezo tone duration (ms)"
+        default 180
+        range 10 60000
+
+    config PIEZO_DEFAULT_GAP_MS
+        int "Default piezo pattern gap (ms)"
+        default 90
+        range 10 60000
+
+    config PIEZO_DEFAULT_DUTY_PCT
+        int "Default piezo duty cycle (%)"
+        default 40
+        range 1 90
+
+endmenu
+
+menu "Boot Health & Watchdog"
+
+    config BOOT_STABILITY_DELAY_MS
+        int "Stable-boot delay before clearing crash counter (ms)"
+        default 30000
+        range 5000 600000
+        help
+            Time after app_main completes before the persistent crash counter
+            is cleared. Crashes inside this window accumulate toward the
+            safe-mode threshold and trip recovery on the next boot.
+
+    config BOOT_SAFE_MODE_THRESHOLD
+        int "Consecutive crashes that trigger safe mode"
+        default 5
+        range 2 20
+        help
+            Once the crash counter reaches this value, non-essential
+            subsystems (WASM runtime, swarm bridge, mmWave, display, channel
+            hopping) are skipped at boot so the OTA endpoint stays
+            recoverable.
+
+    config MAIN_LOOP_WDT_TIMEOUT_S
+        int "Main-loop task watchdog timeout (seconds)"
+        default 30
+        range 5 300
+        help
+            Task watchdog timeout for the application main loop and
+            background tasks. The main loop kicks the watchdog every few
+            seconds; a real hang triggers an automatic panic + reboot which
+            is then captured by the boot crash counter.
+
+    config WIFI_RECONNECT_BACKOFF_MS
+        int "WiFi reconnect retry interval after MAX_RETRY (ms)"
+        default 30000
+        range 1000 600000
+        help
+            Once the initial 10 fast retries are exhausted the firmware
+            keeps trying to reconnect on this slower cadence rather than
+            giving up entirely. Required for unattended remote nodes.
+
+endmenu
+
 menu "AMOLED Display (ADR-045)"
 
     config DISPLAY_ENABLE

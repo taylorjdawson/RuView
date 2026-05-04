@@ -96,6 +96,17 @@ void nvs_config_load(nvs_config_t *cfg)
     cfg->filter_mac_set = 0;
     memset(cfg->filter_mac, 0, 6);
 
+    /* Piezo defaults from Kconfig. */
+#if CONFIG_PIEZO_GPIO >= 0
+    cfg->piezo_gpio = (uint8_t)CONFIG_PIEZO_GPIO;
+#else
+    cfg->piezo_gpio = 255;
+#endif
+    cfg->piezo_freq_hz = (uint16_t)CONFIG_PIEZO_DEFAULT_FREQ_HZ;
+    cfg->piezo_duration_ms = (uint16_t)CONFIG_PIEZO_DEFAULT_DURATION_MS;
+    cfg->piezo_gap_ms = (uint16_t)CONFIG_PIEZO_DEFAULT_GAP_MS;
+    cfg->piezo_duty_pct = (uint8_t)CONFIG_PIEZO_DEFAULT_DUTY_PCT;
+
     /* Try to override from NVS */
     nvs_handle_t handle;
     esp_err_t err = nvs_open("csi_cfg", NVS_READONLY, &handle);
@@ -300,6 +311,50 @@ void nvs_config_load(nvs_config_t *cfg)
         ESP_LOGI(TAG, "NVS override: filter_mac=%02x:%02x:%02x:%02x:%02x:%02x",
                  cfg->filter_mac[0], cfg->filter_mac[1], cfg->filter_mac[2],
                  cfg->filter_mac[3], cfg->filter_mac[4], cfg->filter_mac[5]);
+    }
+
+    /* Piezo control defaults. */
+    uint8_t piezo_gpio_val;
+    if (nvs_get_u8(handle, "piezo_gpio", &piezo_gpio_val) == ESP_OK) {
+        if (piezo_gpio_val <= 48 || piezo_gpio_val == 255) {
+            cfg->piezo_gpio = piezo_gpio_val;
+            ESP_LOGI(TAG, "NVS override: piezo_gpio=%u", (unsigned)cfg->piezo_gpio);
+        } else {
+            ESP_LOGW(TAG, "NVS piezo_gpio=%u invalid, ignored", (unsigned)piezo_gpio_val);
+        }
+    }
+
+    uint16_t piezo_freq_val;
+    if (nvs_get_u16(handle, "piezo_freq", &piezo_freq_val) == ESP_OK) {
+        if (piezo_freq_val >= 100 && piezo_freq_val <= 20000) {
+            cfg->piezo_freq_hz = piezo_freq_val;
+            ESP_LOGI(TAG, "NVS override: piezo_freq_hz=%u", (unsigned)cfg->piezo_freq_hz);
+        }
+    }
+
+    uint16_t piezo_ms_val;
+    if (nvs_get_u16(handle, "piezo_ms", &piezo_ms_val) == ESP_OK) {
+        if (piezo_ms_val >= 10) {
+            cfg->piezo_duration_ms = piezo_ms_val;
+            ESP_LOGI(TAG, "NVS override: piezo_duration_ms=%u",
+                     (unsigned)cfg->piezo_duration_ms);
+        }
+    }
+
+    uint16_t piezo_gap_val;
+    if (nvs_get_u16(handle, "piezo_gap", &piezo_gap_val) == ESP_OK) {
+        if (piezo_gap_val >= 10) {
+            cfg->piezo_gap_ms = piezo_gap_val;
+            ESP_LOGI(TAG, "NVS override: piezo_gap_ms=%u", (unsigned)cfg->piezo_gap_ms);
+        }
+    }
+
+    uint8_t piezo_duty_val;
+    if (nvs_get_u8(handle, "piezo_duty", &piezo_duty_val) == ESP_OK) {
+        if (piezo_duty_val >= 1 && piezo_duty_val <= 90) {
+            cfg->piezo_duty_pct = piezo_duty_val;
+            ESP_LOGI(TAG, "NVS override: piezo_duty_pct=%u", (unsigned)cfg->piezo_duty_pct);
+        }
     }
 
     /* ADR-066: Swarm bridge */

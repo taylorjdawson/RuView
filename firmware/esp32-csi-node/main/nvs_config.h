@@ -11,6 +11,7 @@
 #ifndef NVS_CONFIG_H
 #define NVS_CONFIG_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /** Maximum lengths for NVS string fields. */
@@ -55,6 +56,13 @@ typedef struct {
     uint8_t  csi_channel;                    /**< Explicit CSI channel override (0 = auto-detect). */
     uint8_t  filter_mac[6];                  /**< MAC address to filter CSI frames. */
     uint8_t  filter_mac_set;                 /**< 1 if filter_mac was loaded from NVS. */
+
+    /* Configurable piezo speaker output */
+    uint8_t  piezo_gpio;                     /**< PWM GPIO, or 255 when disabled. */
+    uint16_t piezo_freq_hz;                  /**< Default tone frequency for command-triggered playback. */
+    uint16_t piezo_duration_ms;              /**< Default tone duration. */
+    uint16_t piezo_gap_ms;                   /**< Default gap between repeated chirps. */
+    uint8_t  piezo_duty_pct;                 /**< Default PWM duty cycle percentage. */
 
     /* ADR-066: Swarm bridge configuration */
     char     seed_url[64];                /**< Cognitum Seed base URL (empty = disabled). */
