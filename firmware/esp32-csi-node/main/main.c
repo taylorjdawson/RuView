@@ -21,6 +21,7 @@
 #include "sdkconfig.h"
 
 #include "boot_health.h"
+#include "config_http.h"
 #include "csi_collector.h"
 #include "stream_sender.h"
 #include "nvs_config.h"
@@ -385,6 +386,13 @@ void app_main(void)
     ESP_LOGI(TAG, "Mock CSI mode: skipping OTA server (no network)");
 #endif
 
+    /* Register remote NVS config + reboot endpoints. Available even in safe
+     * mode so a stuck node can be reconfigured without USB. */
+    if (ota_server != NULL) {
+        config_http_register(ota_server);
+        piezo_control_register_http(ota_server);
+    }
+
     /* ADR-040: Initialize WASM programmable sensing runtime.
      * Skipped in safe mode — the WASM3 runtime allocates from PSRAM and
      * runs uploaded bytecode, both of which are plausible crash sources. */
@@ -402,7 +410,6 @@ void app_main(void)
         /* Register WASM upload endpoints on the OTA HTTP server. */
         if (ota_server != NULL) {
             wasm_upload_register(ota_server);
-            piezo_control_register_http(ota_server);
         }
 
         /* Start periodic timer for wasm_runtime_on_timer(). */
