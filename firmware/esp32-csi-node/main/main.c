@@ -282,15 +282,25 @@ void app_main(void)
     /* Subscribe the application task to the task watchdog so a hard hang
      * inside any of the synchronous inits below auto-reboots and increments
      * the crash counter. The IDLE-task TWDT is configured by Kconfig and is
-     * already running by this point. */
+     * already running by this point — we reconfigure it so our timeout +
+     * trigger_panic settings stick (esp_task_wdt_init returns
+     * ESP_ERR_INVALID_STATE if the SDK already initialized TWDT at boot,
+     * silently leaving the SDK defaults in place). */
     esp_task_wdt_config_t twdt_cfg = {
         .timeout_ms = (uint32_t)CONFIG_MAIN_LOOP_WDT_TIMEOUT_S * 1000U,
         .idle_core_mask = (1U << portNUM_PROCESSORS) - 1U,
         .trigger_panic = true,
     };
-    esp_err_t wdt_init_ret = esp_task_wdt_init(&twdt_cfg);
-    if (wdt_init_ret != ESP_OK && wdt_init_ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "TWDT init failed: %s", esp_err_to_name(wdt_init_ret));
+    esp_err_t wdt_cfg_ret = esp_task_wdt_reconfigure(&twdt_cfg);
+    if (wdt_cfg_ret == ESP_ERR_INVALID_STATE) {
+        /* Not yet initialized — use init instead. */
+        wdt_cfg_ret = esp_task_wdt_init(&twdt_cfg);
+    }
+    if (wdt_cfg_ret != ESP_OK) {
+        ESP_LOGW(TAG, "TWDT (re)configure failed: %s", esp_err_to_name(wdt_cfg_ret));
+    } else {
+        ESP_LOGI(TAG, "TWDT configured: timeout=%us, trigger_panic=true",
+                 (unsigned)CONFIG_MAIN_LOOP_WDT_TIMEOUT_S);
     }
     esp_err_t wdt_add_ret = esp_task_wdt_add(NULL);
     if (wdt_add_ret != ESP_OK && wdt_add_ret != ESP_ERR_INVALID_ARG) {
@@ -571,9 +581,11 @@ void app_main(void)
     }
 
     /* Main loop — feed the task watchdog so a wedged main task triggers a
-     * panic + reboot rather than silently sitting unreachable. */
+     * panic + reboot rather than silently sitting unreachable. Feed every
+     * second so the WDT timeout (default 30s) has comfortable headroom even
+     * if scheduling jitter delays a wakeup. */
     while (1) {
         esp_task_wdt_reset();
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
