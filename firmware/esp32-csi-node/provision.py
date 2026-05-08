@@ -83,6 +83,19 @@ def build_nvs_csv(args):
         writer.writerow(["piezo_gap", "data", "u16", str(args.piezo_gap)])
     if args.piezo_duty is not None:
         writer.writerow(["piezo_duty", "data", "u8", str(args.piezo_duty)])
+    # ADR-081: I2S microphone
+    if args.mic_enable is not None:
+        writer.writerow(["mic_enable", "data", "u8", str(args.mic_enable)])
+    if args.mic_ws is not None:
+        writer.writerow(["mic_ws", "data", "u8", str(args.mic_ws)])
+    if args.mic_sck is not None:
+        writer.writerow(["mic_sck", "data", "u8", str(args.mic_sck)])
+    if args.mic_sd is not None:
+        writer.writerow(["mic_sd", "data", "u8", str(args.mic_sd)])
+    if args.mic_sr is not None:
+        writer.writerow(["mic_sr", "data", "u16", str(args.mic_sr)])
+    if args.mic_shift is not None:
+        writer.writerow(["mic_shift", "data", "u8", str(args.mic_shift)])
     # ADR-073: Multi-frequency channel hopping
     if args.hop_channels is not None:
         channels = [int(c.strip()) for c in args.hop_channels.split(",")]
@@ -229,6 +242,13 @@ def main():
     parser.add_argument("--piezo-ms", type=int, help="Default piezo tone duration in milliseconds")
     parser.add_argument("--piezo-gap", type=int, help="Default gap between repeated chirps in milliseconds")
     parser.add_argument("--piezo-duty", type=int, help="Default piezo PWM duty cycle percentage (1-90)")
+    # ADR-081: I2S microphone
+    parser.add_argument("--mic-enable", type=int, help="Enable I2S mic (0=off, 1=on; default 0)")
+    parser.add_argument("--mic-ws",     type=int, help="Mic WS GPIO (default 2 = D1)")
+    parser.add_argument("--mic-sck",    type=int, help="Mic SCK GPIO (default 4 = D3)")
+    parser.add_argument("--mic-sd",     type=int, help="Mic SD GPIO (default 5 = D4)")
+    parser.add_argument("--mic-sr",     type=int, help="Mic sample rate Hz (default 16000)")
+    parser.add_argument("--mic-shift",  type=int, help="Mic 32->24 bit shift (default 14)")
     # ADR-073: Multi-frequency channel hopping
     parser.add_argument("--hop-channels", type=str, help="Comma-separated channel list for hopping (e.g. '1,6,11')")
     parser.add_argument("--hop-dwell", type=int, default=200, help="Dwell time per channel in ms (default: 200)")
@@ -259,6 +279,9 @@ def main():
         args.piezo_gpio is not None, args.piezo_freq is not None,
         args.piezo_ms is not None, args.piezo_gap is not None,
         args.piezo_duty is not None,
+        args.mic_enable is not None, args.mic_ws is not None,
+        args.mic_sck is not None, args.mic_sd is not None,
+        args.mic_sr is not None, args.mic_shift is not None,
         args.seed_url is not None, args.zone is not None,
         args.ota_psk is not None,
     ])
@@ -296,6 +319,16 @@ def main():
         parser.error(f"--piezo-gap must be 10-60000 ms, got {args.piezo_gap}")
     if args.piezo_duty is not None and not (1 <= args.piezo_duty <= 90):
         parser.error(f"--piezo-duty must be 1-90, got {args.piezo_duty}")
+    # ADR-081 mic validation
+    if args.mic_enable is not None and args.mic_enable not in (0, 1):
+        parser.error(f"--mic-enable must be 0 or 1, got {args.mic_enable}")
+    for name, val in (("--mic-ws", args.mic_ws), ("--mic-sck", args.mic_sck), ("--mic-sd", args.mic_sd)):
+        if val is not None and not (0 <= val <= 48):
+            parser.error(f"{name} must be 0-48, got {val}")
+    if args.mic_sr is not None and not (8000 <= args.mic_sr <= 48000):
+        parser.error(f"--mic-sr must be 8000-48000 Hz, got {args.mic_sr}")
+    if args.mic_shift is not None and not (8 <= args.mic_shift <= 16):
+        parser.error(f"--mic-shift must be 8-16, got {args.mic_shift}")
 
     # OTA PSK: resolve 'auto'/'clear'/explicit, then re-bind to args for downstream use.
     if args.ota_psk is not None:

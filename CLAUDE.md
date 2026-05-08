@@ -81,6 +81,20 @@ All 5 ruvector crates integrated in workspace:
 
 **Not supported:** ESP32 (original), ESP32-C3 — single-core, can't run CSI DSP pipeline.
 
+### XIAO ESP32-S3 Pin Layout (locked — see ADR-081)
+
+Single-firmware design supports any combination of speaker + mic per node. Each sensor gates on NVS at boot; same image runs on speaker-only, mic-only, both, or neither.
+
+| Sensor | XIAO silkscreen | ESP32-S3 GPIO | Role |
+|---|---|---|---|
+| Piezo PWM | D0 | GPIO 1 | LEDC PWM output |
+| Mic WS (LRCLK) | D1 | GPIO 2 | I2S WS |
+| *(skip D2 / GPIO 3 — strap pin)* | — | — | reserved |
+| Mic SCK (BCLK) | D3 | GPIO 4 | I2S BCLK |
+| Mic SD (DIN) | D4 | GPIO 5 | I2S data in |
+
+NVS gating: `piezo_gpio` (255 = disabled), `mic_enable` (0 = disabled). Both writable via `/config/set` over the OTA HTTP server.
+
 ### Build & Test Commands (this repo)
 ```bash
 # Rust — full workspace tests (1,031+ tests, ~2 min)

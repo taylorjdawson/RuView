@@ -313,4 +313,56 @@ menu "Mock CSI (QEMU Testing)"
         bool "Log every mock frame (verbose)"
         depends on CSI_MOCK_ENABLED
         default n
+
+    menu "Audio Microphone (ADR-081)"
+
+        config AUDIO_MIC_DEFAULT_SR
+            int "Default sample rate (Hz)"
+            default 16000
+            range 8000 48000
+            help
+                Initial mic_sample_rate value when NVS has no override.
+                16000 fits voice/event detection, technically out of strict
+                SPH0645 spec but widely reported to work. Bump to 32000 if
+                the part misbehaves.
+
+        config AUDIO_MIC_DEFAULT_SHIFT
+            int "Default 32->24 alignment shift (bits)"
+            default 8
+            range 8 16
+            help
+                Arithmetic right shift applied to raw 32-bit I2S samples
+                to recover the 24-bit sample. SPH0645 left-justifies its
+                24-bit data in a 32-bit slot with the bottom 8 bits as
+                noise/zero, so shift=8 recovers the full 24-bit signed
+                range that maps to -1.0..1.0 after dividing by 2^23.
+                Empirically validated on node 4 (2026-05-08); the handoff
+                doc's "14" gave correct waveforms but compressed dynamic
+                range to 1/64 of the headroom.
+
+        config AUDIO_MIC_HPF_CUTOFF_HZ
+            int "DC-removal HPF cutoff (Hz)"
+            default 80
+            range 20 500
+            help
+                First-order IIR high-pass filter cutoff applied to remove
+                the SPH0645's DC bias. 80 Hz is below voice; raise to ~150
+                Hz if low-frequency rumble is a concern.
+
+        config AUDIO_MIC_WINDOW_MS
+            int "Feature window (ms)"
+            default 1000
+            range 100 5000
+            help
+                Per-window stats are accumulated for this many ms before
+                emitting a UDP frame and a serial log line.
+
+        config AUDIO_MIC_RAW_UDP_STREAM
+            bool "DEV: stream raw 32-bit samples instead of features"
+            default n
+            help
+                Bandwidth-heavy (~1 Mbps at 16 kHz stereo). Only useful for
+                offline DSP work on a host. Leave off in production.
+    endmenu
+
 endmenu

@@ -107,6 +107,14 @@ void nvs_config_load(nvs_config_t *cfg)
     cfg->piezo_gap_ms = (uint16_t)CONFIG_PIEZO_DEFAULT_GAP_MS;
     cfg->piezo_duty_pct = (uint8_t)CONFIG_PIEZO_DEFAULT_DUTY_PCT;
 
+    /* ADR-081: I2S microphone defaults — locked pin layout. */
+    cfg->mic_enable      = 0;         /* opt-in per node */
+    cfg->mic_ws_gpio     = 2;         /* D1 */
+    cfg->mic_sck_gpio    = 4;         /* D3 */
+    cfg->mic_sd_gpio     = 5;         /* D4 */
+    cfg->mic_sample_rate = 16000;
+    cfg->mic_shift_bits  = 8;   /* 24-bit-in-32-slot recovery; see ADR-081 */
+
     /* Try to override from NVS */
     nvs_handle_t handle;
     esp_err_t err = nvs_open("csi_cfg", NVS_READONLY, &handle);
@@ -354,6 +362,63 @@ void nvs_config_load(nvs_config_t *cfg)
         if (piezo_duty_val >= 1 && piezo_duty_val <= 90) {
             cfg->piezo_duty_pct = piezo_duty_val;
             ESP_LOGI(TAG, "NVS override: piezo_duty_pct=%u", (unsigned)cfg->piezo_duty_pct);
+        }
+    }
+
+    /* ADR-081: I2S microphone overrides. */
+    uint8_t mic_enable_val;
+    if (nvs_get_u8(handle, "mic_enable", &mic_enable_val) == ESP_OK) {
+        cfg->mic_enable = mic_enable_val ? 1 : 0;
+        ESP_LOGI(TAG, "NVS override: mic_enable=%u", (unsigned)cfg->mic_enable);
+    }
+
+    uint8_t mic_ws_val;
+    if (nvs_get_u8(handle, "mic_ws", &mic_ws_val) == ESP_OK) {
+        if (mic_ws_val <= 48) {
+            cfg->mic_ws_gpio = mic_ws_val;
+            ESP_LOGI(TAG, "NVS override: mic_ws_gpio=%u", (unsigned)cfg->mic_ws_gpio);
+        } else {
+            ESP_LOGW(TAG, "NVS mic_ws=%u invalid, ignored", (unsigned)mic_ws_val);
+        }
+    }
+
+    uint8_t mic_sck_val;
+    if (nvs_get_u8(handle, "mic_sck", &mic_sck_val) == ESP_OK) {
+        if (mic_sck_val <= 48) {
+            cfg->mic_sck_gpio = mic_sck_val;
+            ESP_LOGI(TAG, "NVS override: mic_sck_gpio=%u", (unsigned)cfg->mic_sck_gpio);
+        } else {
+            ESP_LOGW(TAG, "NVS mic_sck=%u invalid, ignored", (unsigned)mic_sck_val);
+        }
+    }
+
+    uint8_t mic_sd_val;
+    if (nvs_get_u8(handle, "mic_sd", &mic_sd_val) == ESP_OK) {
+        if (mic_sd_val <= 48) {
+            cfg->mic_sd_gpio = mic_sd_val;
+            ESP_LOGI(TAG, "NVS override: mic_sd_gpio=%u", (unsigned)cfg->mic_sd_gpio);
+        } else {
+            ESP_LOGW(TAG, "NVS mic_sd=%u invalid, ignored", (unsigned)mic_sd_val);
+        }
+    }
+
+    uint16_t mic_sr_val;
+    if (nvs_get_u16(handle, "mic_sr", &mic_sr_val) == ESP_OK) {
+        if (mic_sr_val >= 8000 && mic_sr_val <= 48000) {
+            cfg->mic_sample_rate = mic_sr_val;
+            ESP_LOGI(TAG, "NVS override: mic_sample_rate=%u", (unsigned)cfg->mic_sample_rate);
+        } else {
+            ESP_LOGW(TAG, "NVS mic_sr=%u invalid, ignored", (unsigned)mic_sr_val);
+        }
+    }
+
+    uint8_t mic_shift_val;
+    if (nvs_get_u8(handle, "mic_shift", &mic_shift_val) == ESP_OK) {
+        if (mic_shift_val >= 8 && mic_shift_val <= 16) {
+            cfg->mic_shift_bits = mic_shift_val;
+            ESP_LOGI(TAG, "NVS override: mic_shift_bits=%u", (unsigned)cfg->mic_shift_bits);
+        } else {
+            ESP_LOGW(TAG, "NVS mic_shift=%u invalid, ignored", (unsigned)mic_shift_val);
         }
     }
 

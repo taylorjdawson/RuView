@@ -31,3 +31,8 @@ CONFIG_LWIP_SO_RCVBUF=y
 
 # FreeRTOS: increase task stack for CSI processing
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# ADR-081: disable AMOLED display on this fleet — none of the deployed XIAOs
+# have a display, and display_hal.c claims GPIOs 4/5 (mic SCK/SD) for the
+# QSPI data lines. Leave it on in upstream/Kconfig for users who have one.
+# CONFIG_DISPLAY_ENABLE is not set

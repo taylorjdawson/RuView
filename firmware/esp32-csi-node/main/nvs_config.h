@@ -64,6 +64,14 @@ typedef struct {
     uint16_t piezo_gap_ms;                   /**< Default gap between repeated chirps. */
     uint8_t  piezo_duty_pct;                 /**< Default PWM duty cycle percentage. */
 
+    /* ADR-081: I2S MEMS microphone */
+    uint8_t  mic_enable;                     /**< 0 = disabled (default), 1 = enabled. */
+    uint8_t  mic_ws_gpio;                    /**< I2S WS GPIO (default 2 = D1). */
+    uint8_t  mic_sck_gpio;                   /**< I2S BCLK GPIO (default 4 = D3). */
+    uint8_t  mic_sd_gpio;                    /**< I2S DIN GPIO (default 5 = D4). */
+    uint16_t mic_sample_rate;                /**< Sample rate in Hz (default 16000). */
+    uint8_t  mic_shift_bits;                 /**< 32->24 alignment shift (default 8 — full 24-bit range). */
+
     /* ADR-066: Swarm bridge configuration */
     char     seed_url[64];                /**< Cognitum Seed base URL (empty = disabled). */
     char     seed_token[64];             /**< Seed Bearer token (from pairing). */

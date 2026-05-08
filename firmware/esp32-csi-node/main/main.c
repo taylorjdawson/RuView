@@ -20,6 +20,7 @@
 #include "esp_app_desc.h"
 #include "sdkconfig.h"
 
+#include "audio_mic.h"
 #include "boot_health.h"
 #include "config_http.h"
 #include "csi_collector.h"
@@ -391,6 +392,7 @@ void app_main(void)
     if (ota_server != NULL) {
         config_http_register(ota_server);
         piezo_control_register_http(ota_server);
+        audio_mic_register_http(ota_server);
     }
 
     /* ADR-040: Initialize WASM programmable sensing runtime.
@@ -482,6 +484,26 @@ void app_main(void)
 #else
     ESP_LOGI(TAG, "Mock CSI mode: skipping swarm bridge");
 #endif
+
+    /* ADR-081: I2S microphone — gated on NVS mic_enable, skipped in safe mode. */
+    if (safe_mode) {
+        ESP_LOGW(TAG, "Safe mode: skipping audio_mic init");
+    } else if (g_nvs_config.mic_enable) {
+        audio_mic_config_t mcfg = {
+            .ws_gpio     = g_nvs_config.mic_ws_gpio,
+            .sck_gpio    = g_nvs_config.mic_sck_gpio,
+            .sd_gpio     = g_nvs_config.mic_sd_gpio,
+            .sample_rate = g_nvs_config.mic_sample_rate,
+            .shift_bits  = g_nvs_config.mic_shift_bits,
+        };
+        esp_err_t mic_ret = audio_mic_init(&mcfg);
+        if (mic_ret != ESP_OK) {
+            ESP_LOGW(TAG, "audio_mic init failed: %s (continuing)",
+                     esp_err_to_name(mic_ret));
+        }
+    } else {
+        ESP_LOGI(TAG, "Audio mic disabled (mic_enable=0)");
+    }
 
     /* Initialize power management. */
     power_mgmt_init(g_nvs_config.power_duty);

@@ -53,6 +53,20 @@ static const config_key_def_t s_config_keys[] = {
       "Piezo default gap between chirps in ms" },
     { "piezo_duty", CONFIG_KEY_TYPE_U8,  1,   90,    0,   false,
       "Piezo default duty cycle percent (1-90)" },
+
+    /* ADR-081: I2S microphone — disabled by default, opt-in per node. */
+    { "mic_enable", CONFIG_KEY_TYPE_U8,  0,   1,     0,   false,
+      "Enable I2S mic (0=off, 1=on)" },
+    { "mic_ws",     CONFIG_KEY_TYPE_U8,  0,   48,    0,   false,
+      "Mic WS GPIO (default 2 = D1)" },
+    { "mic_sck",    CONFIG_KEY_TYPE_U8,  0,   48,    0,   false,
+      "Mic SCK GPIO (default 4 = D3)" },
+    { "mic_sd",     CONFIG_KEY_TYPE_U8,  0,   48,    0,   false,
+      "Mic SD GPIO (default 5 = D4)" },
+    { "mic_sr",     CONFIG_KEY_TYPE_U16, 8000, 48000, 0,  false,
+      "Mic sample rate Hz (default 16000)" },
+    { "mic_shift",  CONFIG_KEY_TYPE_U8,  8,   16,    0,   false,
+      "Mic 32->24 bit shift (default 14)" },
 };
 #define CONFIG_KEY_COUNT (sizeof(s_config_keys) / sizeof(s_config_keys[0]))
 
