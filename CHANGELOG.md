@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`wifi_densepose` Python package** — `from wifi_densepose import WiFiDensePose` now works (#314).
 
 ### Fixed
+- **OTA hang on mic-enabled nodes (firmware 0.8.1-audio-stream)** — `audio_mic_pause`/`audio_mic_resume` now run inside `ota_quiesce_runtime`. Without this, the I2S task on core 1 starves the WiFi RX path enough that OTA POST stalls indefinitely on any node with `mic_enable=1`. Pre-fix, those nodes could only be flashed via USB.
 - **Watchdog crash on busy LANs (#321)** — Batch-limited edge_dsp to 4 frames before 20ms yield. Fixed idle-path busy-spin (`pdMS_TO_TICKS(5)==0`).
 - **No detection from edge vitals (#323)** — Server now generates `sensing_update` from Tier 2+ vitals packets.
 - **RSSI byte offset mismatch (#332)** — Server parsed RSSI from wrong byte (was reading sequence counter).
@@ -113,6 +114,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Audio raw-stream debug pipeline (ADR-081 §debug)** — end-to-end "is the mic actually picking up sound?" loop without `sox`/`nc`.
+  - Firmware (`0.8.1-audio-stream`): three new endpoints — `POST /audio/raw_stream/start?duration_s=N&port=P[&ip=A]`, `POST /audio/raw_stream/stop`, `GET /audio/raw_stream/status`. Defaults to streaming back to the HTTP peer when `?ip=` is omitted, so callers don't need to know their own IP.
+  - `stream_sender_send_to(data, len, ip, port)` for arbitrary-destination UDP debug sends without disturbing the configured CSI/feature path.
+  - `wifi-densepose listen --node <IP>` — clone-and-run CLI subcommand. Live playback via `cpal` (cross-platform), optional WAV write via `--out`, `--no-play` for headless save-only runs. `mat` feature now optional so `--no-default-features` builds cleanly without OpenBLAS toolchain.
 - **QEMU ESP32-S3 testing platform (ADR-061)** — 9-layer firmware testing without hardware
   - Mock CSI generator with 10 physics-based scenarios (empty room, walking, fall, multi-person, etc.)
   - Single-node QEMU runner with 16-check UART validation

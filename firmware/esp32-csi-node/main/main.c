@@ -120,6 +120,20 @@ static esp_err_t ota_quiesce_runtime(void *ctx)
     }
 #endif
 
+    /* Pause audio mic — without this, OTA POST hangs on mic-enabled nodes
+     * because the I2S DMA + UDP feature emit chew enough core 1 time to
+     * starve the WiFi/HTTP RX path during the multi-MB upload. */
+    err = audio_mic_pause();
+    if (err != ESP_OK) {
+#ifdef CONFIG_DISPLAY_ENABLE
+        (void)display_task_resume();
+#endif
+#ifndef CONFIG_CSI_MOCK_SKIP_WIFI_CONNECT
+        (void)csi_collector_resume();
+#endif
+        return err;
+    }
+
     ESP_LOGI(TAG, "Runtime workloads quiesced for OTA");
     return ESP_OK;
 }
@@ -130,6 +144,11 @@ static esp_err_t ota_restore_runtime(void *ctx)
 
     esp_err_t first_err = ESP_OK;
     esp_err_t err = ESP_OK;
+
+    err = audio_mic_resume();
+    if (err != ESP_OK && first_err == ESP_OK) {
+        first_err = err;
+    }
 
 #ifdef CONFIG_DISPLAY_ENABLE
     err = display_task_resume();

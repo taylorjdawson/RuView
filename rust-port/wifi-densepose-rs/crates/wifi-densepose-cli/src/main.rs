@@ -18,11 +18,16 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        #[cfg(feature = "mat")]
         Commands::Mat(mat_cmd) => {
             wifi_densepose_cli::mat::execute(mat_cmd).await?;
         }
+        Commands::Listen(listen_args) => {
+            wifi_densepose_cli::listen::execute(listen_args).await?;
+        }
         Commands::Version => {
             println!("wifi-densepose {}", env!("CARGO_PKG_VERSION"));
+            #[cfg(feature = "mat")]
             println!("MAT module version: {}", wifi_densepose_mat::VERSION);
         }
     }

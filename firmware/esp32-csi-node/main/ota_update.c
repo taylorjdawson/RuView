@@ -343,7 +343,8 @@ static esp_err_t ota_start_server(httpd_handle_t *out_handle)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = OTA_PORT;
-    config.max_uri_handlers = 12;  /* Extra slots for WASM endpoints (ADR-040). */
+    config.max_uri_handlers = 20;  /* Headroom for OTA(2)+config(3)+piezo(4)+audio(2)+
+                                    * audio_raw_stream(3)+wasm(5) = 19. ADR-081 §debug. */
     config.stack_size = OTA_HTTPD_STACK_SIZE;
     /* Increase receive timeout for large uploads. */
     config.recv_wait_timeout = 30;

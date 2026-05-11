@@ -90,11 +90,48 @@ The `0xC511` magic family at the time of this ADR:
 - **Skipped in safe mode.** If audio init ever panics, the boot-loop counter trips and a clean recovery boot has audio off + OTA reachable. Same pattern as mmWave / WASM / display.
 - **Server-side ingestion deferred.** The Rust sensing server's UDP listener silently drops unknown magics, so 0.8.0 firmware on a server that doesn't yet parse `0xC5110007` is safe — frames are noop'd. A follow-up PR adds the parser to `wifi-densepose-sensing-server`.
 
+## Debug raw-PCM stream (firmware 0.8.1-audio-stream)
+
+For end-to-end audio debugging — "is the mic actually picking up sound?" — the firmware exposes a bounded raw-PCM emission mode on top of the feature stream above. This is **not** a frame format with magic; it's just int16 LE bytes on the wire so anything (`sox`, `ffplay`, the bundled `wifi-densepose listen` CLI) can decode it without a parser.
+
+### Endpoints
+
+| Method | URI | Purpose |
+|---|---|---|
+| `POST` | `/audio/raw_stream/start?duration_s=N&port=P[&ip=A]` | Arm raw-PCM emission. `duration_s` ∈ [1, 300]. `port` ∈ [1024, 65535]. If `ip` is omitted the firmware streams to the HTTP peer (i.e. the caller). |
+| `POST` | `/audio/raw_stream/stop` | Disarm before the deadline elapses. |
+| `GET`  | `/audio/raw_stream/status` | `{active, remaining_ms, ip, port, chunks_sent, sample_rate, chunk_samples}` — also used by the CLI to discover the wire format. |
+
+All three are gated by `ota_update_require_auth`. Auto-deadline + 300 s ceiling prevent a client crash from leaving the radio time hogged forever. Last-writer-wins on concurrent `/start` calls.
+
+### Wire format
+
+- Raw int16 LE mono, post-HPF (same DSP path as the feature stream — DC bias removed before saturating int32 → int16).
+- 320-sample chunks per UDP datagram = **640 bytes payload**. At 32 kHz that's 10 ms cadence; at 16 kHz it's 20 ms.
+- ~512 kbps at 32 kHz, ~256 kbps at 16 kHz. Single sample-rate UDP unicast.
+- No header. Decode with `sox -t raw -r 32000 -e signed -b 16 -c 1` or equivalent.
+
+### CLI integration
+
+`wifi-densepose-cli` ships a `listen` subcommand that orchestrates the round-trip without `sox`/`nc`:
+
+```
+wifi-densepose listen --node 192.168.0.95 --duration_s 30 [--out capture.wav] [--no-play]
+```
+
+Binds a free local UDP port → posts `/start` (firmware reads peer IP automatically) → decodes int16 chunks → `cpal` for live playback and/or `hound` for WAV write. Cross-platform (macOS / Linux / Proxmox VM); no system audio deps beyond what `cpal` already brings in.
+
+### OTA-while-mic-on
+
+`audio_mic_pause`/`audio_mic_resume` were added and wired into `ota_quiesce_runtime` in this version. Without them, the audio task on core 1 starves the WiFi RX path enough that OTA POST hangs on any mic-enabled node. Pre-0.8.1 mic-enabled nodes can only be flashed via USB; from 0.8.1 onward, OTA is supported with the mic running.
+
 ## References
 
 - `firmware/esp32-csi-node/main/audio_mic.{h,c}` — implementation
+- `firmware/esp32-csi-node/main/stream_sender.{h,c}` — `stream_sender_send_to` for arbitrary IP+port debug sends
 - `firmware/esp32-csi-node/main/nvs_config.c` — defaults and NVS overrides
 - `firmware/esp32-csi-node/main/config_http.c` — `/config/set` whitelist
+- `rust-port/wifi-densepose-rs/crates/wifi-densepose-cli/src/listen.rs` — listener CLI
 - ADR-018 — original CSI frame format (this is the same `0xC511` family)
 - ADR-080 — most recent prior ADR
 - HomeView roadmap §"Tier 1: Sensing Pipeline" — audio integration target

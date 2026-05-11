@@ -26,6 +26,8 @@
 
 use clap::{Parser, Subcommand};
 
+pub mod listen;
+#[cfg(feature = "mat")]
 pub mod mat;
 
 /// WiFi-DensePose Command Line Interface
@@ -43,8 +45,14 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Mass Casualty Assessment Tool commands
+    #[cfg(feature = "mat")]
     #[command(subcommand)]
     Mat(mat::MatCommand),
+
+    /// Stream raw audio from an ESP32-CSI node's mic, live or to a WAV file.
+    ///
+    /// Pairs with the firmware's /audio/raw_stream endpoints (ADR-081).
+    Listen(listen::ListenArgs),
 
     /// Display version information
     Version,

@@ -117,6 +117,31 @@ int stream_sender_send(const uint8_t *data, size_t len)
     return sent;
 }
 
+int stream_sender_send_to(const uint8_t *data, size_t len,
+                          const char *ip, uint16_t port)
+{
+    if (s_sock < 0 || data == NULL || len == 0 || ip == NULL || port == 0) {
+        return -1;
+    }
+
+    struct sockaddr_in dest = {0};
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip, &dest.sin_addr) <= 0) {
+        return -1;
+    }
+
+    int sent = sendto(s_sock, data, len, 0,
+                      (struct sockaddr *)&dest, sizeof(dest));
+    if (sent < 0 && errno != ENOMEM) {
+        /* ENOMEM is expected under WiFi pressure; debug stream is best-effort.
+         * Log other errors so we don't lose silent-failure modes. */
+        ESP_LOGW(TAG, "stream_sender_send_to %s:%u failed: errno %d",
+                 ip, (unsigned)port, errno);
+    }
+    return sent;
+}
+
 void stream_sender_deinit(void)
 {
     if (s_sock >= 0) {

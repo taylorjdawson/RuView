@@ -19,6 +19,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/sockets.h"
 #include "nvs_config.h"
 #include "ota_update.h"
 #include "stream_sender.h"
@@ -35,6 +36,13 @@ static const char *TAG = "audio_mic";
 #define WINDOW_LOG_SECONDS     1
 #define TEST_CAPTURE_MS        1000
 
+/* Debug raw-PCM stream — ships post-HPF int16 samples to a UDP listener
+ * for end-to-end audio debugging. Not a frame format with magic; just bytes. */
+#define RAW_CHUNK_SAMPLES      320     /* 20 ms @ 16 kHz, 10 ms @ 32 kHz */
+#define RAW_DEFAULT_DUR_S      60u
+#define RAW_MAX_DUR_S          300u
+#define RAW_IP_BUFLEN          16
+
 extern nvs_config_t g_nvs_config;
 
 typedef struct {
@@ -48,15 +56,28 @@ typedef struct {
     SemaphoreHandle_t  test_done;
     _Atomic bool       test_pending;     /* task picks this up between windows */
     float              hpf_alpha;        /* IIR HPF coefficient */
+
+    /* Raw-PCM debug stream — see audio_raw_*_handler. */
+    _Atomic bool       raw_active;
+    _Atomic int64_t    raw_deadline_us;
+    _Atomic uint16_t   raw_target_port;
+    _Atomic uint32_t   raw_chunks_sent;
+    SemaphoreHandle_t  raw_ip_lock;      /* protects raw_target_ip */
+    char               raw_target_ip[RAW_IP_BUFLEN];
 } audio_mic_state_t;
 
 static audio_mic_state_t s = {
-    .rx_handle    = NULL,
-    .task         = NULL,
-    .status_lock  = NULL,
-    .test_lock    = NULL,
-    .test_done    = NULL,
-    .test_pending = false,
+    .rx_handle       = NULL,
+    .task            = NULL,
+    .status_lock     = NULL,
+    .test_lock       = NULL,
+    .test_done       = NULL,
+    .test_pending    = false,
+    .raw_active      = false,
+    .raw_deadline_us = 0,
+    .raw_target_port = 0,
+    .raw_chunks_sent = 0,
+    .raw_ip_lock     = NULL,
 };
 
 /* ---- Helpers ---------------------------------------------------------- */
@@ -241,6 +262,28 @@ static void window_finalize_and_publish(window_acc_t *w, uint32_t window_seq)
     stream_sender_send(pkt, sizeof(pkt));
 }
 
+/* ---- Raw-PCM debug stream -------------------------------------------- */
+
+static void emit_raw_chunk(const int16_t *chunk, size_t bytes)
+{
+    char ip[RAW_IP_BUFLEN];
+    if (s.raw_ip_lock == NULL) return;
+    if (xSemaphoreTake(s.raw_ip_lock, 0) != pdTRUE) {
+        return;  /* lock held by /start handler — drop this 10/20 ms chunk */
+    }
+    memcpy(ip, s.raw_target_ip, sizeof(ip));
+    xSemaphoreGive(s.raw_ip_lock);
+
+    if (ip[0] == '\0') return;
+    uint16_t port = atomic_load(&s.raw_target_port);
+    if (port == 0) return;
+
+    int sent = stream_sender_send_to((const uint8_t *)chunk, bytes, ip, port);
+    if (sent > 0) {
+        atomic_fetch_add(&s.raw_chunks_sent, 1u);
+    }
+}
+
 /* ---- Background task -------------------------------------------------- */
 
 static void audio_task(void *arg)
@@ -287,6 +330,11 @@ static void audio_task(void *arg)
     uint32_t window_target = s.cfg.sample_rate * WINDOW_LOG_SECONDS;
     uint32_t window_seq    = 0;
 
+    /* Raw-stream chunk buffer (lives on the audio task stack via this scope). */
+    int16_t  raw_chunk[RAW_CHUNK_SAMPLES];
+    size_t   raw_fill = 0;
+    bool     raw_was_active = false;
+
     for (;;) {
         size_t bytes_read = 0;
         esp_err_t err = i2s_channel_read(s.rx_handle, dma_buf,
@@ -303,6 +351,45 @@ static void audio_task(void *arg)
         for (size_t i = 0; i < pairs; i++) {
             int32_t left_raw = dma_buf[2 * i];
             int32_t aligned  = shift_align(left_raw, s.cfg.shift_bits);
+
+            /* Raw-stream mode check, evaluated per-sample so we can transition
+             * mid-DMA-buffer when the deadline elapses. */
+            bool raw_now = atomic_load(&s.raw_active);
+            if (raw_now && esp_timer_get_time() >= atomic_load(&s.raw_deadline_us)) {
+                atomic_store(&s.raw_active, false);
+                ESP_LOGI(TAG, "raw stream deadline elapsed — back to features");
+                raw_now = false;
+            }
+
+            if (raw_now) {
+                /* Apply the same HPF as the feature path (shared IIR state in
+                 * win.x_prev/y_prev keeps continuity across mode switches). */
+                float dy = (float)win.y_prev + (float)(aligned - win.x_prev);
+                int32_t y = (int32_t)lrintf(s.hpf_alpha * dy);
+                win.x_prev = aligned;
+                win.y_prev = y;
+
+                /* Saturate int32 → int16. */
+                if (y > 32767) y = 32767;
+                else if (y < -32768) y = -32768;
+                raw_chunk[raw_fill++] = (int16_t)y;
+
+                if (raw_fill >= RAW_CHUNK_SAMPLES) {
+                    emit_raw_chunk(raw_chunk, raw_fill * sizeof(int16_t));
+                    raw_fill = 0;
+                }
+                raw_was_active = true;
+                continue;  /* skip feature accumulation while raw is active */
+            }
+
+            if (raw_was_active) {
+                /* Just exited raw mode — discard partial chunk and reset the
+                 * feature window so the next emission has clean accumulators. */
+                raw_fill = 0;
+                window_reset(&win);
+                raw_was_active = false;
+            }
+
             window_consume(&win, aligned, s.hpf_alpha);
 
             if (win.samples >= window_target) {
@@ -329,7 +416,9 @@ esp_err_t audio_mic_init(const audio_mic_config_t *cfg)
     s.status_lock = xSemaphoreCreateMutex();
     s.test_lock   = xSemaphoreCreateMutex();
     s.test_done   = xSemaphoreCreateBinary();
-    if (s.status_lock == NULL || s.test_lock == NULL || s.test_done == NULL) {
+    s.raw_ip_lock = xSemaphoreCreateMutex();
+    if (s.status_lock == NULL || s.test_lock == NULL ||
+        s.test_done == NULL   || s.raw_ip_lock == NULL) {
         ESP_LOGE(TAG, "Failed to create sync primitives");
         return ESP_ERR_NO_MEM;
     }
@@ -351,6 +440,42 @@ esp_err_t audio_mic_init(const audio_mic_config_t *cfg)
         s.rx_handle = NULL;
         return ESP_ERR_NO_MEM;
     }
+    return ESP_OK;
+}
+
+esp_err_t audio_mic_pause(void)
+{
+    if (s.task == NULL) {
+        return ESP_OK;  /* mic was never initialized — no-op */
+    }
+    vTaskSuspend(s.task);
+    if (s.rx_handle != NULL) {
+        esp_err_t err = i2s_channel_disable(s.rx_handle);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "i2s_channel_disable on pause: %s", esp_err_to_name(err));
+            /* Resume the task so we don't end up wedged. */
+            vTaskResume(s.task);
+            return err;
+        }
+    }
+    ESP_LOGI(TAG, "audio mic paused");
+    return ESP_OK;
+}
+
+esp_err_t audio_mic_resume(void)
+{
+    if (s.task == NULL) {
+        return ESP_OK;
+    }
+    if (s.rx_handle != NULL) {
+        esp_err_t err = i2s_channel_enable(s.rx_handle);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "i2s_channel_enable on resume: %s", esp_err_to_name(err));
+            return err;
+        }
+    }
+    vTaskResume(s.task);
+    ESP_LOGI(TAG, "audio mic resumed");
     return ESP_OK;
 }
 
@@ -442,6 +567,160 @@ static esp_err_t audio_test_handler(httpd_req_t *req)
     return httpd_resp_sendstr(req, resp);
 }
 
+/* ---- /audio/raw_stream handlers -------------------------------------- */
+
+/* Pull the IPv4 dotted-quad of the HTTP peer out of the underlying socket.
+ * Used as the default destination for raw_stream sends so the CLI can simply
+ * POST without first having to know its own LAN IP. */
+static esp_err_t get_peer_ipv4(httpd_req_t *req, char *out, size_t out_len)
+{
+    if (req == NULL || out == NULL || out_len < INET_ADDRSTRLEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    int sockfd = httpd_req_to_sockfd(req);
+    if (sockfd < 0) return ESP_FAIL;
+
+    struct sockaddr_in6 peer;
+    socklen_t peer_len = sizeof(peer);
+    if (getpeername(sockfd, (struct sockaddr *)&peer, &peer_len) != 0) {
+        return ESP_FAIL;
+    }
+
+    if (peer.sin6_family == AF_INET) {
+        const struct sockaddr_in *p4 = (const struct sockaddr_in *)&peer;
+        if (inet_ntop(AF_INET, &p4->sin_addr, out, out_len) == NULL) {
+            return ESP_FAIL;
+        }
+        return ESP_OK;
+    }
+    if (peer.sin6_family == AF_INET6 && IN6_IS_ADDR_V4MAPPED(&peer.sin6_addr)) {
+        /* IPv4-mapped IPv6: extract last 4 bytes. */
+        if (inet_ntop(AF_INET, &peer.sin6_addr.s6_addr[12], out, out_len) == NULL) {
+            return ESP_FAIL;
+        }
+        return ESP_OK;
+    }
+    return ESP_FAIL;
+}
+
+static uint32_t parse_query_u32(const char *query, const char *key, uint32_t fallback)
+{
+    char val[16] = {0};
+    if (httpd_query_key_value(query, key, val, sizeof(val)) != ESP_OK) {
+        return fallback;
+    }
+    char *end = NULL;
+    unsigned long v = strtoul(val, &end, 10);
+    if (end == val) return fallback;
+    return (uint32_t)v;
+}
+
+static esp_err_t audio_raw_start_handler(httpd_req_t *req)
+{
+    if (ota_update_require_auth(req, "audio raw_stream start") != ESP_OK) {
+        return ESP_OK;  /* require_auth already sent the 401 */
+    }
+
+    char query[160] = {0};
+    size_t qlen = httpd_req_get_url_query_len(req);
+    if (qlen > 0 && qlen < sizeof(query)) {
+        httpd_req_get_url_query_str(req, query, sizeof(query));
+    }
+
+    uint32_t duration_s = parse_query_u32(query, "duration_s", RAW_DEFAULT_DUR_S);
+    uint32_t port       = parse_query_u32(query, "port",       0u);
+
+    if (duration_s < 1u) duration_s = 1u;
+    if (duration_s > RAW_MAX_DUR_S) duration_s = RAW_MAX_DUR_S;
+    if (port < 1024u || port > 65535u) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "port must be in [1024, 65535]");
+    }
+
+    char ip[RAW_IP_BUFLEN] = {0};
+    if (httpd_query_key_value(query, "ip", ip, sizeof(ip)) == ESP_OK && ip[0] != '\0') {
+        struct in_addr tmp;
+        if (inet_pton(AF_INET, ip, &tmp) <= 0) {
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                       "invalid ip (expected IPv4 dotted-quad)");
+        }
+    } else {
+        if (get_peer_ipv4(req, ip, sizeof(ip)) != ESP_OK) {
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                       "could not resolve peer IP; pass ?ip=");
+        }
+    }
+
+    /* Update destination atomically (port + ip behind lock + flag last). */
+    if (s.raw_ip_lock != NULL && xSemaphoreTake(s.raw_ip_lock, portMAX_DELAY) == pdTRUE) {
+        memset(s.raw_target_ip, 0, sizeof(s.raw_target_ip));
+        strncpy(s.raw_target_ip, ip, sizeof(s.raw_target_ip) - 1);
+        xSemaphoreGive(s.raw_ip_lock);
+    }
+    atomic_store(&s.raw_target_port, (uint16_t)port);
+    atomic_store(&s.raw_chunks_sent, 0u);
+    int64_t deadline = esp_timer_get_time() + (int64_t)duration_s * 1000000LL;
+    atomic_store(&s.raw_deadline_us, deadline);
+    atomic_store(&s.raw_active, true);
+
+    char resp[160];
+    int n = snprintf(resp, sizeof(resp),
+        "{\"ok\":true,\"duration_s\":%lu,\"ip\":\"%s\",\"port\":%lu}",
+        (unsigned long)duration_s, ip, (unsigned long)port);
+    if (n < 0 || n >= (int)sizeof(resp)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "raw_stream start serialization");
+    }
+    ESP_LOGI(TAG, "raw_stream start → %s:%lu for %lus",
+             ip, (unsigned long)port, (unsigned long)duration_s);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, resp);
+}
+
+static esp_err_t audio_raw_stop_handler(httpd_req_t *req)
+{
+    if (ota_update_require_auth(req, "audio raw_stream stop") != ESP_OK) {
+        return ESP_OK;
+    }
+    bool was = atomic_exchange(&s.raw_active, false);
+    ESP_LOGI(TAG, "raw_stream stop (was_active=%s)", was ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+static esp_err_t audio_raw_status_handler(httpd_req_t *req)
+{
+    bool active = atomic_load(&s.raw_active);
+    int64_t deadline = atomic_load(&s.raw_deadline_us);
+    int64_t now_us = esp_timer_get_time();
+    int64_t remaining_ms = active ? (deadline - now_us) / 1000 : 0;
+    if (remaining_ms < 0) remaining_ms = 0;
+    uint16_t port = atomic_load(&s.raw_target_port);
+    uint32_t chunks = atomic_load(&s.raw_chunks_sent);
+
+    char ip[RAW_IP_BUFLEN] = {0};
+    if (s.raw_ip_lock != NULL && xSemaphoreTake(s.raw_ip_lock, 0) == pdTRUE) {
+        memcpy(ip, s.raw_target_ip, sizeof(ip));
+        xSemaphoreGive(s.raw_ip_lock);
+    }
+
+    char resp[200];
+    int n = snprintf(resp, sizeof(resp),
+        "{\"active\":%s,\"remaining_ms\":%lld,\"ip\":\"%s\","
+        "\"port\":%u,\"chunks_sent\":%lu,\"sample_rate\":%u,"
+        "\"chunk_samples\":%u}",
+        active ? "true" : "false",
+        (long long)remaining_ms, ip, (unsigned)port,
+        (unsigned long)chunks, (unsigned)s.cfg.sample_rate,
+        (unsigned)RAW_CHUNK_SAMPLES);
+    if (n < 0 || n >= (int)sizeof(resp)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "raw_stream status serialization");
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, resp);
+}
+
 esp_err_t audio_mic_register_http(httpd_handle_t server)
 {
     if (server == NULL) return ESP_ERR_INVALID_ARG;
@@ -454,12 +733,30 @@ esp_err_t audio_mic_register_http(httpd_handle_t server)
         .uri = "/audio/test", .method = HTTP_POST,
         .handler = audio_test_handler, .user_ctx = NULL,
     };
+    httpd_uri_t raw_start_uri = {
+        .uri = "/audio/raw_stream/start", .method = HTTP_POST,
+        .handler = audio_raw_start_handler, .user_ctx = NULL,
+    };
+    httpd_uri_t raw_stop_uri = {
+        .uri = "/audio/raw_stream/stop", .method = HTTP_POST,
+        .handler = audio_raw_stop_handler, .user_ctx = NULL,
+    };
+    httpd_uri_t raw_status_uri = {
+        .uri = "/audio/raw_stream/status", .method = HTTP_GET,
+        .handler = audio_raw_status_handler, .user_ctx = NULL,
+    };
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_register_uri_handler(server, &status_uri));
     ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_register_uri_handler(server, &test_uri));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_register_uri_handler(server, &raw_start_uri));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_register_uri_handler(server, &raw_stop_uri));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(httpd_register_uri_handler(server, &raw_status_uri));
 
     ESP_LOGI(TAG, "Audio HTTP control ready:");
     ESP_LOGI(TAG, "  GET  /audio/status");
     ESP_LOGI(TAG, "  POST /audio/test");
+    ESP_LOGI(TAG, "  POST /audio/raw_stream/start?duration_s=N&port=P[&ip=A]");
+    ESP_LOGI(TAG, "  POST /audio/raw_stream/stop");
+    ESP_LOGI(TAG, "  GET  /audio/raw_stream/status");
     return ESP_OK;
 }

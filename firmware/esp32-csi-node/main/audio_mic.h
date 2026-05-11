@@ -81,4 +81,19 @@ esp_err_t audio_mic_run_test(audio_mic_test_result_t *out);
 /** Register /audio/status and /audio/test endpoints on the OTA HTTP server. */
 esp_err_t audio_mic_register_http(httpd_handle_t server);
 
+/**
+ * Pause the audio capture task and disable the I2S channel. Safe to call when
+ * audio_mic was never initialized (mic_enable=0 nodes return ESP_OK no-op).
+ *
+ * Used by the OTA quiesce hook so the WiFi/HTTP stack has full CPU + buffer
+ * headroom while a 1 MiB firmware blob streams in. Without this, OTA POST
+ * hangs indefinitely on any node with mic_enable=1.
+ *
+ * @return ESP_OK on success or no-op; ESP_FAIL if I2S disable failed.
+ */
+esp_err_t audio_mic_pause(void);
+
+/** Re-enable the I2S channel and resume the audio task. Pair with audio_mic_pause. */
+esp_err_t audio_mic_resume(void);
+
 #endif /* AUDIO_MIC_H */

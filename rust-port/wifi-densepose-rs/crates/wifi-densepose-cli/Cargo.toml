@@ -17,11 +17,14 @@ path = "src/main.rs"
 
 [features]
 default = ["mat"]
-mat = []
+# `mat` pulls in wifi-densepose-mat which transitively brings in openblas-src.
+# Made optional so `--no-default-features` builds cleanly on Mac/Proxmox boxes
+# that just want the `listen` subcommand without OpenBLAS toolchain set up.
+mat = ["dep:wifi-densepose-mat"]
 
 [dependencies]
-# Internal crates
-wifi-densepose-mat = { version = "0.3.0", path = "../wifi-densepose-mat" }
+# Internal crates (gated by the `mat` feature)
+wifi-densepose-mat = { version = "0.3.0", path = "../wifi-densepose-mat", optional = true }
 
 # CLI framework
 clap = { version = "4.4", features = ["derive", "env", "cargo"] }
@@ -53,6 +56,13 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# `listen` subcommand: HTTP control to firmware + UDP receive + audio playback / WAV write.
+# rustls to avoid system OpenSSL on macOS / Proxmox / dev boxes.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+cpal = "0.15"
+hound = "3.5"
+ctrlc = "3.4"
 
 [dev-dependencies]
 assert_cmd = "2.0"
