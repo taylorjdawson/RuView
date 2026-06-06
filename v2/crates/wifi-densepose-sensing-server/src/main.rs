@@ -1793,32 +1793,67 @@ fn smooth_and_classify_node(ns: &mut NodeState, raw: &mut ClassificationInfo, ra
     raw.confidence = (0.4 + sm * 0.6).clamp(0.0, 1.0);
 }
 
+fn live_node_features_json(
+    node_states: &HashMap<u8, NodeState>,
+    now: std::time::Instant,
+) -> serde_json::Value {
+    let nodes: Vec<_> = node_states
+        .iter()
+        .filter_map(|(&node_id, ns)| {
+            let last_seen = ns.last_frame_time?;
+            if now.saturating_duration_since(last_seen) > ESP32_OFFLINE_TIMEOUT {
+                return None;
+            }
+            let features = ns.latest_features.as_ref()?;
+            Some(serde_json::json!({
+                "node_id": node_id,
+                "features": features,
+                "rssi_dbm": ns.rssi_history.back().copied().unwrap_or(features.mean_rssi),
+            }))
+        })
+        .collect();
+    serde_json::Value::Array(nodes)
+}
+
 /// If an adaptive model is loaded, override the classification with the
-/// model's prediction.  Uses the full 15-feature vector for higher accuracy.
+/// model's prediction. Uses the feature width the loaded model was trained on.
 fn adaptive_override(
     state: &AppStateInner,
     features: &FeatureInfo,
     classification: &mut ClassificationInfo,
 ) {
     if let Some(ref model) = state.adaptive_model {
-        // Get current frame amplitudes from the latest history entry.
-        let amps = state
-            .frame_history
-            .back()
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        let feat_arr = adaptive_classifier::features_from_runtime(
-            &serde_json::json!({
-                "variance": features.variance,
-                "motion_band_power": features.motion_band_power,
-                "breathing_band_power": features.breathing_band_power,
-                "spectral_power": features.spectral_power,
-                "dominant_freq_hz": features.dominant_freq_hz,
-                "change_points": features.change_points,
-                "mean_rssi": features.mean_rssi,
-            }),
-            amps,
-        );
+        let node_features_json =
+            live_node_features_json(&state.node_states, std::time::Instant::now());
+        let has_live_node_features = node_features_json
+            .as_array()
+            .map(|nodes| !nodes.is_empty())
+            .unwrap_or(false);
+
+        let feat_arr = if model.n_features == adaptive_classifier::MULTI_NODE_N_FEATURES {
+            if !has_live_node_features {
+                return;
+            }
+            adaptive_classifier::multi_features_from_runtime(&node_features_json)
+        } else {
+            let amps = state
+                .frame_history
+                .back()
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            adaptive_classifier::features_from_runtime(
+                &serde_json::json!({
+                    "variance": features.variance,
+                    "motion_band_power": features.motion_band_power,
+                    "breathing_band_power": features.breathing_band_power,
+                    "spectral_power": features.spectral_power,
+                    "dominant_freq_hz": features.dominant_freq_hz,
+                    "change_points": features.change_points,
+                    "mean_rssi": features.mean_rssi,
+                }),
+                amps,
+            )
+        };
         let (label, conf) = model.classify(&feat_arr);
         classification.motion_level = label.to_string();
         classification.presence = label != "absent";
@@ -3962,25 +3997,53 @@ async fn train_stop(State(state): State<SharedState>) -> Json<serde_json::Value>
 
 // ── Adaptive classifier endpoints ────────────────────────────────────────────
 
+fn adaptive_feature_schema(n_features: usize) -> &'static str {
+    adaptive_classifier::feature_schema(n_features)
+}
+
+fn adaptive_train_success_response(model: &adaptive_classifier::AdaptiveModel) -> serde_json::Value {
+    let stats: Vec<_> = model
+        .class_stats
+        .iter()
+        .map(|cs| {
+            serde_json::json!({
+                "class": cs.label,
+                "samples": cs.count,
+                "feature_means": cs.mean,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "success": true,
+        "trained_frames": model.trained_frames,
+        "accuracy": model.training_accuracy,
+        "n_features": model.n_features,
+        "feature_schema": adaptive_feature_schema(model.n_features),
+        "class_stats": stats,
+    })
+}
+
+fn adaptive_status_loaded_response(model: &adaptive_classifier::AdaptiveModel) -> serde_json::Value {
+    serde_json::json!({
+        "loaded": true,
+        "trained_frames": model.trained_frames,
+        "accuracy": model.training_accuracy,
+        "version": model.version,
+        "classes": model.class_names,
+        "n_features": model.n_features,
+        "feature_schema": adaptive_feature_schema(model.n_features),
+        "class_stats": model.class_stats,
+    })
+}
+
 /// POST /api/v1/adaptive/train — train the adaptive classifier from recordings.
 async fn adaptive_train(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let rec_dir = PathBuf::from("data/recordings");
     eprintln!("=== Adaptive Classifier Training ===");
     match adaptive_classifier::train_from_recordings(&rec_dir) {
         Ok(model) => {
-            let accuracy = model.training_accuracy;
-            let frames = model.trained_frames;
-            let stats: Vec<_> = model
-                .class_stats
-                .iter()
-                .map(|cs| {
-                    serde_json::json!({
-                        "class": cs.label,
-                        "samples": cs.count,
-                        "feature_means": cs.mean,
-                    })
-                })
-                .collect();
+            let response = adaptive_train_success_response(&model);
 
             // Save to disk.
             if let Err(e) = model.save(&adaptive_classifier::model_path()) {
@@ -3996,12 +4059,7 @@ async fn adaptive_train(State(state): State<SharedState>) -> Json<serde_json::Va
             let mut s = state.write().await;
             s.adaptive_model = Some(model);
 
-            Json(serde_json::json!({
-                "success": true,
-                "trained_frames": frames,
-                "accuracy": accuracy,
-                "class_stats": stats,
-            }))
+            Json(response)
         }
         Err(e) => Json(serde_json::json!({
             "success": false,
@@ -4014,14 +4072,7 @@ async fn adaptive_train(State(state): State<SharedState>) -> Json<serde_json::Va
 async fn adaptive_status(State(state): State<SharedState>) -> Json<serde_json::Value> {
     let s = state.read().await;
     match &s.adaptive_model {
-        Some(model) => Json(serde_json::json!({
-            "loaded": true,
-            "trained_frames": model.trained_frames,
-            "accuracy": model.training_accuracy,
-            "version": model.version,
-            "classes": model.class_names,
-            "class_stats": model.class_stats,
-        })),
+        Some(model) => Json(adaptive_status_loaded_response(model)),
         None => Json(serde_json::json!({
             "loaded": false,
             "message": "No adaptive model. POST /api/v1/adaptive/train to train one.",
@@ -4907,26 +4958,30 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                     ) = extract_features_from_frame(&frame, &ns.frame_history, sample_rate_hz);
                     smooth_and_classify_node(ns, &mut classification, raw_motion);
 
-                    // Adaptive override using cloned model (safe, no raw pointers).
+                    // Legacy adaptive override using cloned model (safe, no raw pointers).
+                    // Multi-node models run after `latest_features` is stored below.
                     if let Some(ref model) = adaptive_model_clone {
-                        let amps = ns.frame_history.back().map(|v| v.as_slice()).unwrap_or(&[]);
-                        let feat_arr = adaptive_classifier::features_from_runtime(
-                            &serde_json::json!({
-                                "variance": features.variance,
-                                "motion_band_power": features.motion_band_power,
-                                "breathing_band_power": features.breathing_band_power,
-                                "spectral_power": features.spectral_power,
-                                "dominant_freq_hz": features.dominant_freq_hz,
-                                "change_points": features.change_points,
-                                "mean_rssi": features.mean_rssi,
-                            }),
-                            amps,
-                        );
-                        let (label, conf) = model.classify(&feat_arr);
-                        classification.motion_level = label.to_string();
-                        classification.presence = label != "absent";
-                        classification.confidence =
-                            (conf * 0.7 + classification.confidence * 0.3).clamp(0.0, 1.0);
+                        if model.n_features == adaptive_classifier::LEGACY_N_FEATURES {
+                            let amps =
+                                ns.frame_history.back().map(|v| v.as_slice()).unwrap_or(&[]);
+                            let feat_arr = adaptive_classifier::features_from_runtime(
+                                &serde_json::json!({
+                                    "variance": features.variance,
+                                    "motion_band_power": features.motion_band_power,
+                                    "breathing_band_power": features.breathing_band_power,
+                                    "spectral_power": features.spectral_power,
+                                    "dominant_freq_hz": features.dominant_freq_hz,
+                                    "change_points": features.change_points,
+                                    "mean_rssi": features.mean_rssi,
+                                }),
+                                amps,
+                            );
+                            let (label, conf) = model.classify(&feat_arr);
+                            classification.motion_level = label.to_string();
+                            classification.presence = label != "absent";
+                            classification.confidence =
+                                (conf * 0.7 + classification.confidence * 0.3).clamp(0.0, 1.0);
+                        }
                     }
 
                     ns.rssi_history.push_back(features.mean_rssi);
@@ -4958,6 +5013,28 @@ async fn udp_receiver_task(state: SharedState, udp_port: u16) {
                     // Done with per-node mutable borrow; now read aggregated
                     // state from all nodes (the borrow of `ns` ends here).
                     // (We re-borrow node_states immutably via `s` below.)
+
+                    if let Some(ref model) = adaptive_model_clone {
+                        if model.n_features == adaptive_classifier::MULTI_NODE_N_FEATURES {
+                            let node_features_json =
+                                live_node_features_json(&s.node_states, std::time::Instant::now());
+                            let has_live_node_features = node_features_json
+                                .as_array()
+                                .map(|nodes| !nodes.is_empty())
+                                .unwrap_or(false);
+                            if has_live_node_features {
+                                let feat_arr = adaptive_classifier::multi_features_from_runtime(
+                                    &node_features_json,
+                                );
+                                let (label, conf) = model.classify(&feat_arr);
+                                classification.motion_level = label.to_string();
+                                classification.presence = label != "absent";
+                                classification.confidence =
+                                    (conf * 0.7 + classification.confidence * 0.3)
+                                        .clamp(0.0, 1.0);
+                            }
+                        }
+                    }
 
                     s.rssi_history.push_back(features.mean_rssi);
                     if s.rssi_history.len() > 60 {
@@ -6727,6 +6804,55 @@ async fn config_set_ground_truth(
 }
 
 // ── Unit tests: RollingP95 ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod adaptive_response_tests {
+    use super::*;
+
+    fn test_model(n_features: usize) -> adaptive_classifier::AdaptiveModel {
+        adaptive_classifier::AdaptiveModel {
+            class_stats: vec![adaptive_classifier::ClassStats {
+                label: "absent".to_string(),
+                count: 3,
+                mean: vec![0.0; n_features],
+                stddev: vec![1.0; n_features],
+            }],
+            weights: vec![vec![0.0; n_features + 1]],
+            global_mean: vec![0.0; n_features],
+            global_std: vec![1.0; n_features],
+            trained_frames: 3,
+            training_accuracy: 1.0,
+            version: 1,
+            class_names: vec!["absent".to_string()],
+            n_features,
+        }
+    }
+
+    #[test]
+    fn adaptive_train_response_includes_feature_width() {
+        let response = adaptive_train_success_response(&test_model(
+            adaptive_classifier::MULTI_NODE_N_FEATURES,
+        ));
+
+        assert_eq!(
+            response["n_features"].as_u64(),
+            Some(adaptive_classifier::MULTI_NODE_N_FEATURES as u64)
+        );
+        assert_eq!(response["feature_schema"].as_str(), Some("multi-node-62"));
+    }
+
+    #[test]
+    fn adaptive_status_response_includes_feature_width() {
+        let response =
+            adaptive_status_loaded_response(&test_model(adaptive_classifier::LEGACY_N_FEATURES));
+
+        assert_eq!(
+            response["n_features"].as_u64(),
+            Some(adaptive_classifier::LEGACY_N_FEATURES as u64)
+        );
+        assert_eq!(response["feature_schema"].as_str(), Some("legacy-15"));
+    }
+}
 
 #[cfg(test)]
 mod rolling_p95_tests {

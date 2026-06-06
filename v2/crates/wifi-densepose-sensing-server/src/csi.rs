@@ -560,29 +560,65 @@ pub fn smooth_and_classify_node(ns: &mut NodeState, raw: &mut ClassificationInfo
     raw.confidence = (0.4 + sm * 0.6).clamp(0.0, 1.0);
 }
 
+fn live_node_features_json(
+    node_states: &HashMap<u8, NodeState>,
+    now: std::time::Instant,
+) -> serde_json::Value {
+    let nodes: Vec<_> = node_states
+        .iter()
+        .filter_map(|(&node_id, ns)| {
+            let last_seen = ns.last_frame_time?;
+            if now.saturating_duration_since(last_seen) > ESP32_OFFLINE_TIMEOUT {
+                return None;
+            }
+            let features = ns.latest_features.as_ref()?;
+            Some(serde_json::json!({
+                "node_id": node_id,
+                "features": features,
+                "rssi_dbm": ns.rssi_history.back().copied().unwrap_or(features.mean_rssi),
+            }))
+        })
+        .collect();
+    serde_json::Value::Array(nodes)
+}
+
 pub fn adaptive_override(
     state: &AppStateInner,
     features: &FeatureInfo,
     classification: &mut ClassificationInfo,
 ) {
     if let Some(ref model) = state.adaptive_model {
-        let amps = state
-            .frame_history
-            .back()
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        let feat_arr = adaptive_classifier::features_from_runtime(
-            &serde_json::json!({
-                "variance": features.variance,
-                "motion_band_power": features.motion_band_power,
-                "breathing_band_power": features.breathing_band_power,
-                "spectral_power": features.spectral_power,
-                "dominant_freq_hz": features.dominant_freq_hz,
-                "change_points": features.change_points,
-                "mean_rssi": features.mean_rssi,
-            }),
-            amps,
-        );
+        let node_features_json =
+            live_node_features_json(&state.node_states, std::time::Instant::now());
+        let has_live_node_features = node_features_json
+            .as_array()
+            .map(|nodes| !nodes.is_empty())
+            .unwrap_or(false);
+
+        let feat_arr = if model.n_features == adaptive_classifier::MULTI_NODE_N_FEATURES {
+            if !has_live_node_features {
+                return;
+            }
+            adaptive_classifier::multi_features_from_runtime(&node_features_json)
+        } else {
+            let amps = state
+                .frame_history
+                .back()
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            adaptive_classifier::features_from_runtime(
+                &serde_json::json!({
+                    "variance": features.variance,
+                    "motion_band_power": features.motion_band_power,
+                    "breathing_band_power": features.breathing_band_power,
+                    "spectral_power": features.spectral_power,
+                    "dominant_freq_hz": features.dominant_freq_hz,
+                    "change_points": features.change_points,
+                    "mean_rssi": features.mean_rssi,
+                }),
+                amps,
+            )
+        };
         let (label, conf) = model.classify(&feat_arr);
         classification.motion_level = label.to_string();
         classification.presence = label != "absent";
